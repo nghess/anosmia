@@ -18,6 +18,7 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
         data = data.reshape(-1, order = 'F')
         temp_bin_path = data_path.parent / 'temp.bin'
         data.tofile(temp_bin_path)
+        print(f"Created temporary binary file: {temp_bin_path}")
 
         # Create temporary binary file in data parent directory
         data_path = data_path.parent / 'temp.bin'
