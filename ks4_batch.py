@@ -1,4 +1,5 @@
 import os
+import re
 import numpy as np
 from kilosort import run_kilosort
 from kilosort.io import save_preprocessing, load_ops
@@ -42,6 +43,9 @@ def kilosort(data_path: str, save_path: str, probe_path: str = '8_tetrode.mat', 
     temp_bin_path = data_path.parent / 'temp.bin'
     if temp_bin_path.exists():
         temp_bin_path.unlink()
+
+    # Write to 'good' units summary
+    unit_summary(data_path)
     
     # Return results
     return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
@@ -73,4 +77,21 @@ def print_paths(data_paths):
     for ii, path in enumerate(data_paths):
         print(f"{ii} {path}")
 
+# Grab the number of single units found from kilosort.log and append them to a summary txt file
+def unit_summary(data_path):
+    with open(f"{str(data_path.parent)}/kilosort4/kilosort.log", 'r') as file:
+        content = file.read()
 
+    # Use regex to find the number before "units"
+    pattern = r'(\d{1,3}) units found with good refractory periods'
+    match = re.search(pattern, content)
+
+    if match:
+        # Extract the number from the first capture group
+        num_units = match.group(1)
+        
+        # Append the number to the output file
+        with open(f"{str(data_path.parent.parent)}units_summary.txt", 'a') as outfile:
+            outfile.write(f'{num_units}\n')
+    else:
+        print("No matching pattern found in the file")
