@@ -1,10 +1,9 @@
 
+import os
 import numpy as np
-import pandas as pd
 from kilosort import run_kilosort
 from kilosort.io import save_preprocessing, load_ops
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 def kilosort(data_path: str, save_path: str, probe_path: str = '8_tetrode.mat', num_channels: int = 32, save_preprocessed: bool = True):
     # Initialize paths
@@ -53,18 +52,31 @@ def kilosort(data_path: str, save_path: str, probe_path: str = '8_tetrode.mat', 
     # Return results
     return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
 
+# Get the name of the last two directories in data path
+def get_savedirs(path):
+    path = str(path)
+    parts = path.split(os.path.sep)
+    return os.path.sep.join(parts[-3:-1])
 
 # Get all mua.npy files in a directory and its subdirectories
-def get_mua_paths(directory: str) -> list:
+def get_mua_paths(directory: str, print_paths=False) -> list:
     paths = [f for f in Path(directory).glob('**/*.npy') if 'mua' in f.name]
     print(f'Found {len(paths)} mua.npy files')
+    if print_paths:
+        print_paths(paths)
     return paths
 
 # Get all continuous.dat files in a directory and its subdirectories
-def get_continuous_paths(directory: str) -> list:
+def get_continuous_paths(directory: str, print_paths=False) -> list:
     paths = [f for f in Path(directory).glob('**/*.dat') if 'continuous' in f.name]
     print(f'Found {len(paths)} continuous.dat files')
+    if print_paths:
+        print_paths(paths)
     return paths
 
+# Print collected paths and their indices
+def print_paths(data_paths):
+    for ii, path in enumerate(data_paths):
+        print(f"{ii} {path}")
 
 
