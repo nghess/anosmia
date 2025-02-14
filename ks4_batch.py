@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 from kilosort import run_kilosort
@@ -14,16 +13,11 @@ def kilosort(data_path: str, save_path: str, probe_path: str = '8_tetrode.mat', 
     if data_path.suffix == '.npy':
         # Load .npy file and save as binary
         data = np.load(data_path)
-        # Ensure data is in (samples, channels) format
-        #if data.shape[1] > data.shape[0]:  # If channels > samples, transpose
         print(f"Data import shape:{data.shape}")
-        print(f"Min:{np.min(data)}")
-        print(f"Max:{np.max(data)}")
-
-        # Convert to int16 and save as binary
         data = data.reshape(-1, order = 'F')
         temp_bin_path = data_path.parent / 'temp.bin'
         data.tofile(temp_bin_path)
+
         # Create temporary binary file in data parent directory
         data_path = data_path.parent / 'temp.bin'
 
