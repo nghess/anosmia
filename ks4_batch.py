@@ -77,14 +77,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
             temp_bin_path.unlink()
 
         # Write to 'good' units summary
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val error=False)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val, error=False)
         
         # Return results
         return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
     
     except:
         # Write error to log
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val error=True)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val, error=True)
         return None
     
 """
