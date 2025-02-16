@@ -8,7 +8,7 @@ from pathlib import Path
 """
 Run kilosort4. Use settings dictionary to change kilosort settings for the run.
 """
-def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat', num_channels: int = 32, save_preprocessed: bool = True):
+def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat', num_channels: int = 32, save_preprocessed: bool = True, clean_outliers: bool = True):
     # Initialize paths
     data_path = Path(data_path)
     results_path = Path(results_path)
@@ -24,7 +24,8 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
         data_std = data.std()
         
         # Apply outlier clipping
-        data = clip_outliers_with_window(data)
+        if clean_outliers:
+            data = clip_outliers_with_window(data, clip_mult=2)
         
         data = data.reshape(-1, order = 'F')
         temp_bin_path = data_path.parent / 'temp.bin'
@@ -36,9 +37,8 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
       
     else:
         data = np.load(data_path)
-
-    # Apply per-channel outlier clipping with window
-    data = clip_outliers_with_window(data, clip_mult=2)
+        if clean_outliers:
+            data = clip_outliers_with_window(data, clip_mult=2)
 
     # Create results directory if it doesn't exist
     results_path.mkdir(parents=True, exist_ok=True)
@@ -63,14 +63,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
             temp_bin_path.unlink()
 
         # Write to 'good' units summary
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, data_mean, data_std, 2, error=False)
+        unit_summary(data_path, results_path, data_min, data_max, data_std, 2, error=False)
         
         # Return results
         return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
     
     except:
         # Write error to log
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, data_mean, data_std, 2, error=True)
+        unit_summary(data_path, results_path, data_min, data_max, data_std, 2, error=True)
         return None
     
 """
@@ -156,7 +156,7 @@ def clip_outliers_with_window(data: np.ndarray, clip_mult: float = 2, window_siz
     return data
 
 # Grab the number of single units found from kilosort.log and append them to a summary txt file
-def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=False):
+def unit_summary(data_path, results_path, data_min, data_max, data_std, clip_mult, error=False):
 
     mouse_session = get_savedirs(data_path)
     savedir = results_path.parents[1]
@@ -177,10 +177,10 @@ def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_st
         
         # Append the number to the output file
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
+            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} std: {round(data_std, 3)}, clip_mult: {clip_mult}\n")
     elif error:
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
+            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} std: {round(data_std, 3)}, clip_mult: {clip_mult}\n")
     else:
         with open(output_file, 'a') as outfile:
             outfile.write(f"{mouse_session} - No matching pattern found in the log file\n")
