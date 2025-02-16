@@ -86,18 +86,10 @@ def get_savedirs(path):
     parts = path.split(os.path.sep)
     return os.path.sep.join(parts[-3:-1])
 
-# Get all mua.npy files in a directory and its subdirectories
-def get_mua_paths(directory: str, print_paths=False) -> list:
-    paths = [f for f in Path(directory).glob('**/*.npy') if 'mua' in f.name]
-    print(f'Found {len(paths)} mua.npy files')
-    if print_paths:
-        show_paths(paths)
-    return paths
-
-# Get all continuous.dat files in a directory and its subdirectories
-def get_continuous_paths(directory: str, print_paths=False) -> list:
-    paths = [f for f in Path(directory).glob('**/*.dat') if 'continuous' in f.name]
-    print(f'Found {len(paths)} continuous.dat files')
+# Get all files matching extension and keyword in a directory and its subdirectories
+def get_file_paths(directory: str, extension: str, keyword: str, print_paths=False) -> list:
+    paths = [f for f in Path(directory).glob(f'**/*.{extension}') if keyword in f.name]
+    print(f'Found {len(paths)} {keyword}.{extension} files')
     if print_paths:
         show_paths(paths)
     return paths
@@ -189,3 +181,22 @@ def unit_summary(data_path, results_path, data_min, data_max, data_std, clip_mul
             outfile.write(f"{mouse_session} - No matching pattern found in the log file\n")
 
     print(f"Summary written to {output_file}")
+
+
+"""
+Functions for camera TTL
+"""
+
+def ttl_bool(data_path: str, results_path: str, save=True):
+    data = np.load(data_path)
+
+    # Check floor and std of ttl signal
+    floor = np.min(data)
+    std = np.std(data)
+    
+    # Rebuild ttl signal as boolean
+    ttl_bool = data > floor + std
+
+    if save:
+        np.save(results_path, ttl_bool)
+    return ttl_bool
