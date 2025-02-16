@@ -187,16 +187,96 @@ def unit_summary(data_path, results_path, data_min, data_max, data_std, clip_mul
 Functions for camera TTL
 """
 
-def ttl_bool(data_path: str, results_path: str, save=True):
+def ttl_bool(data_path: str, results_path: str, sample_hz=30000, resample_hz=1000, save=True):
     data = np.load(data_path)
 
-    # Check floor and std of ttl signal
-    floor = np.min(data)
-    std = np.std(data)
+    #Resample data to 1000 Hz
+    ttl_resample = data[::sample_hz//resample_hz]
+
+    # Normalize to 0-1 range
+    normalized = (ttl_resample - np.min(ttl_resample)) / (np.max(ttl_resample) - np.min(ttl_resample))
     
     # Rebuild ttl signal as boolean
-    ttl_bool = data > floor + std
+    ttl_bool = ttl_resample > -30000
 
     if save:
         np.save(results_path, ttl_bool)
     return ttl_bool
+
+
+def clean_camera_ttl(signal, threshold=-30000, min_frame_duration=20, min_frame_spacing=20):
+    # Initial threshold
+    binary = (signal < threshold).astype(int)
+    print("Number of samples below threshold:", np.sum(binary))
+    
+    # Find potential frame boundaries
+    transitions = np.diff(binary)
+    starts = np.where(transitions == 1)[0]
+    ends = np.where(transitions == -1)[0]
+    print("Number of starts found:", len(starts))
+    print("Number of ends found:", len(ends))
+    if len(starts) > 0:
+        print("First few start indices:", starts[:5])
+    if len(ends) > 0:
+        print("First few end indices:", ends[:5])
+    
+    # Ensure we have matching starts and ends
+    if len(starts) == 0 or len(ends) == 0:
+        print("No valid transitions found")
+        return np.zeros_like(signal, dtype=int)
+    
+    if ends[0] < starts[0]:
+        ends = ends[1:]
+    if len(starts) > len(ends):
+        starts = starts[:-1]
+    
+    #print("After matching, number of potential frames:", len(starts))
+    
+    # Filter based on duration and spacing
+    valid_frames = []
+    last_valid_end = -min_frame_spacing
+    
+    for start, end in zip(starts, ends):
+        duration = end - start
+        spacing = start - last_valid_end
+        #print(f"Frame: start={start}, end={end}, duration={duration}, spacing={spacing}")
+        
+        if duration >= min_frame_duration and spacing >= min_frame_spacing:
+            valid_frames.append((start, end))
+            last_valid_end = end
+    
+    #print("Number of valid frames found:", len(valid_frames))
+    
+    # Create cleaned signal
+    cleaned = np.zeros_like(signal, dtype=int)
+    for start, end in valid_frames:
+        cleaned[start:end] = 1
+        
+    return cleaned
+
+
+def analyze_ttl_timing(signal, threshold=-25000):
+    binary = (signal < threshold).astype(int)
+    transitions = np.diff(binary)
+    starts = np.where(transitions == 1)[0]
+    ends = np.where(transitions == -1)[0]
+    
+    if len(starts) > 0 and len(ends) > 0:
+        # Make sure we have matching pairs
+        if ends[0] < starts[0]:
+            ends = ends[1:]
+        if len(starts) > len(ends):
+            starts = starts[:-1]
+            
+        # Now calculate durations and spacings
+        durations = ends - starts  # How long the signal is "on"
+        spacings = starts[1:] - ends[:-1]  # Time between pulses
+        
+        print(f"Average pulse duration: {np.mean(durations):.2f} samples ({np.mean(durations)/1000*1000:.2f} ms)")
+        print(f"Average spacing between pulses: {np.mean(spacings):.2f} samples ({np.mean(spacings)/1000*1000:.2f} ms)")
+        print(f"Frame rate: {1000/np.mean(starts[1:] - starts[:-1]):.2f} fps")
+        
+        # Additional diagnostic info
+        print(f"\nNumber of pulses analyzed: {len(durations)}")
+        print(f"Duration range: {np.min(durations):.2f} to {np.max(durations):.2f} samples")
+        print(f"Spacing range: {np.min(spacings):.2f} to {np.max(spacings):.2f} samples")
