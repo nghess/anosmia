@@ -35,25 +35,27 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
 
     # Take a sliding window (30k samples, 10k sample overlap) and get the np.min and np.max values
     # Should probably apply this within channels
-    window_size = 30000
-    overlap = 10000
-    num_windows = (data.shape[0] - window_size) // (window_size - overlap) + 1
-    min_vals = np.zeros(num_windows)
-    max_vals = np.zeros(num_windows)
-    for i in range(num_windows):
-        start = i * (window_size - overlap)
-        end = start + window_size
-        min_vals[i] = np.min(data[start:end])
-        max_vals[i] = np.max(data[start:end])
-    # Get mean of min and max values
-    avg_min_val = np.mean(min_vals)
-    avg_max_val = np.mean(max_vals)
-    clip_mult = 2
+    for ii in range(data.shape[0]):
+        
+        window_size = 30000
+        overlap = 10000
+        num_windows = (data.shape[0] - window_size) // (window_size - overlap) + 1
+        min_vals = np.zeros(num_windows)
+        max_vals = np.zeros(num_windows)
+        for i in range(num_windows):
+            start = i * (window_size - overlap)
+            end = start + window_size
+            min_vals[i] = np.min(data[start:end])
+            max_vals[i] = np.max(data[start:end])
+        # Get mean of min and max values
+        avg_min_val = np.mean(min_vals)
+        avg_max_val = np.mean(max_vals)
+        clip_mult = 2
 
-    # If datapoint exceeds clip_mult*max_val, set datapoint to zero
-    data[data > clip_mult*avg_max_val] = 0
-    # If datapoint is less than 5*min_val, set to zero
-    data[data < clip_mult*avg_min_val] = 0
+        # If datapoint exceeds clip_mult*max_val, set datapoint to zero
+        data[data > clip_mult*avg_max_val] = 0
+        # If datapoint is less than 5*min_val, set to zero
+        data[data < clip_mult*avg_min_val] = 0
 
     # Create results directory if it doesn't exist
     results_path.mkdir(parents=True, exist_ok=True)
@@ -141,10 +143,10 @@ def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_st
         
         # Append the number to the output file
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
+            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
     elif error:
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
+            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
     else:
         with open(output_file, 'a') as outfile:
             outfile.write(f"{mouse_session} - No matching pattern found in the log file\n")
