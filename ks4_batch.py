@@ -37,32 +37,8 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
     else:
         data = np.load(data_path)
 
-    # Take a sliding window (30k samples, 10k sample overlap) and get the np.min and np.max values
-    window_size = 30000
-    overlap = 10000
-    num_windows = (data.shape[1] - window_size) // (window_size - overlap) + 1
-    min_vals = np.zeros((data.shape[0], num_windows))
-    max_vals = np.zeros((data.shape[0], num_windows))
-    
-    # Process each channel separately
-    for ch in range(data.shape[0]):
-        for i in range(num_windows):
-            start = i * (window_size - overlap)
-            end = start + window_size
-            min_vals[ch,i] = np.min(data[ch,start:end])
-            max_vals[ch,i] = np.max(data[ch,start:end])
-            
-    # Get mean of min and max values per channel
-    avg_min_vals = np.mean(min_vals, axis=1)
-    avg_max_vals = np.mean(max_vals, axis=1)
-    clip_mult = 2
-
-    # Apply clipping thresholds per channel
-    for ch in range(data.shape[0]):
-        # If datapoint exceeds clip_mult*max_val, set datapoint to zero
-        data[ch, data[ch,:] > clip_mult*avg_max_vals[ch]] = 0
-        # If datapoint is less than clip_mult*min_val, set to zero  
-        data[ch, data[ch,:] < clip_mult*avg_min_vals[ch]] = 0
+    # Apply per-channel outlier clipping with window
+    data = clip_outliers_with_window(data, clip_mult=2)
 
     # Create results directory if it doesn't exist
     results_path.mkdir(parents=True, exist_ok=True)
@@ -87,14 +63,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
             temp_bin_path.unlink()
 
         # Write to 'good' units summary
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=False)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, data_mean, data_std, 2, error=False)
         
         # Return results
         return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
     
     except:
         # Write error to log
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=True)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, data_mean, data_std, 2, error=True)
         return None
     
 """
@@ -133,7 +109,7 @@ def clip_outliers_with_window(data: np.ndarray, clip_mult: float = 2, window_siz
     Clips outlier values in neural data with a ±1 sample window around detected outliers.
     
     Args:
-        data: Neural data array of shape (n_channels, n_samples)
+        data:  Data array of shape (n_channels, n_samples)
         clip_mult: Multiplier for min/max thresholds (default: 2)
         window_size: Size of sliding window for min/max calculation (default: 30000)
         overlap: Overlap between windows (default: 10000)
