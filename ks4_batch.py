@@ -12,20 +12,23 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
     # Initialize paths
     data_path = Path(data_path)
     results_path = Path(results_path)
-
+    
+    # Multiplier for min/max thresholds. Values outside these ranges will be set to zero. Only applies if clean_outliers = True.
+    clip_mult = 3
+    
     # Handle numpy files by temporarily converting to .bin format   
     if data_path.suffix == '.npy':
         # Load .npy file and save as binary
         data = np.load(data_path)
+        print(f"{data_path.parent}")
         print(f"Data import shape:{data.shape}")
         data_min = data.min()
         data_max = data.max()
-        data_mean = data.mean()
         data_std = data.std()
         
         # Apply outlier clipping
         if clean_outliers:
-            data = clip_outliers_with_window(data, clip_mult=2)
+            data = clip_outliers_with_window(data, clip_mult)
         
         data = data.reshape(-1, order = 'F')
         temp_bin_path = data_path.parent / 'temp.bin'
@@ -38,7 +41,7 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
     else:
         data = np.load(data_path)
         if clean_outliers:
-            data = clip_outliers_with_window(data, clip_mult=2)
+            data = clip_outliers_with_window(data, clip_mult)
 
     # Create results directory if it doesn't exist
     results_path.mkdir(parents=True, exist_ok=True)
@@ -63,14 +66,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
             temp_bin_path.unlink()
 
         # Write to 'good' units summary
-        unit_summary(data_path, results_path, data_min, data_max, data_std, 2, error=False)
+        unit_summary(data_path, results_path, data_min, data_max, data_std, clip_mult, error=False)
         
         # Return results
         return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
     
     except:
         # Write error to log
-        unit_summary(data_path, results_path, data_min, data_max, data_std, 2, error=True)
+        unit_summary(data_path, results_path, data_min, data_max, data_std, clip_mult, error=True)
         return None
     
 """
