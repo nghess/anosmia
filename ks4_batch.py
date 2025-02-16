@@ -8,7 +8,7 @@ from pathlib import Path
 """
 Run kilosort4. Use settings dictionary to change kilosort settings for the run.
 """
-def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat', num_channels: int = 32, save_preprocessed: bool = True, clean_outliers: bool = True):
+def kilosort(data_path: str, results_path: str, probe_path: str = 'probe_maps/8_tetrode_2_region_20um.mat', num_channels: int = 32, save_preprocessed: bool = True, clean_outliers: bool = True):
     # Initialize paths
     data_path = Path(data_path)
     results_path = Path(results_path)
