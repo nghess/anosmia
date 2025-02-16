@@ -6,7 +6,7 @@ from kilosort.io import save_preprocessing, load_ops
 from pathlib import Path
 
 """
-Run kilosort4. Settings dictionary corresponds to kilosort settings.
+Run kilosort4. Use settings dictionary to change kilosort settings for the run.
 """
 def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat', num_channels: int = 32, save_preprocessed: bool = True):
     # Initialize paths
@@ -34,6 +34,7 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
         data = np.load(data_path)
 
     # Take a sliding window (30k samples, 10k sample overlap) and get the np.min and np.max values
+    # Should probably apply this within channels
     window_size = 30000
     overlap = 10000
     num_windows = (data.shape[0] - window_size) // (window_size - overlap) + 1
@@ -45,14 +46,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
         min_vals[i] = np.min(data[start:end])
         max_vals[i] = np.max(data[start:end])
     # Get mean of min and max values
-    clip_min_val = np.mean(min_vals)
-    clip_max_val = np.mean(max_vals)
-    three_sigmas = 3 * data.std()
+    avg_min_val = np.mean(min_vals)
+    avg_max_val = np.mean(max_vals)
+    clip_mult = 2
 
-    # If datapoint exceeds 5*max_val, set datapoint to zero
-    data[data > 5*clip_max_val] = 0
+    # If datapoint exceeds clip_mult*max_val, set datapoint to zero
+    data[data > clip_mult*avg_max_val] = 0
     # If datapoint is less than 5*min_val, set to zero
-    data[data < 5*clip_min_val] = 0
+    data[data < clip_mult*avg_min_val] = 0
 
     # Create results directory if it doesn't exist
     results_path.mkdir(parents=True, exist_ok=True)
@@ -77,14 +78,14 @@ def kilosort(data_path: str, results_path: str, probe_path: str = '8_tetrode.mat
             temp_bin_path.unlink()
 
         # Write to 'good' units summary
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val error=False)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=False)
         
         # Return results
         return ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes
     
     except:
         # Write error to log
-        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val error=True)
+        unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=True)
         return None
     
 """
@@ -119,7 +120,7 @@ def show_paths(data_paths):
         print(f"{ii} {path}")
 
 # Grab the number of single units found from kilosort.log and append them to a summary txt file
-def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, clip_min_val, clip_max_val, error=False):
+def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_std, avg_min_val, avg_max_val, clip_mult, error=False):
 
     mouse_session = get_savedirs(data_path)
     savedir = results_path.parents[1]
@@ -140,10 +141,10 @@ def unit_summary(data_path, results_path, data_min, data_max, data_mean, data_st
         
         # Append the number to the output file
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} clip_min: {round(clip_min_val, 3)}, clip_max: {round(clip_max_val, 3)}\n")
+            outfile.write(f"{mouse_session} - {num_units} units - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
     elif error:
         with open(output_file, 'a') as outfile:
-            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} clip_min: {round(clip_min_val, 3)}, clip_max: {round(clip_max_val, 3)}\n")
+            outfile.write(f"{mouse_session} - Kilosort failed - min: {data_min} max: {data_max} mean: {round(data_mean, 3)} std: {round(data_std, 3)} avg_min: {round(avg_min_val, 3)}, avg_max: {round(avg_max_val, 3)}, clip_mult: {clip_mult}\n")
     else:
         with open(output_file, 'a') as outfile:
             outfile.write(f"{mouse_session} - No matching pattern found in the log file\n")
