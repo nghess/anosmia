@@ -1,9 +1,19 @@
 import os
 import re
 import numpy as np
+import pandas as pd
 from kilosort import run_kilosort
 from kilosort.io import save_preprocessing, load_ops
 from pathlib import Path
+from scipy.io import loadmat
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import signal
+from scipy.interpolate import interp1d
+import matplotlib.colors as mcolors
+from concurrent.futures import ProcessPoolExecutor
+
 
 """
 Run kilosort4. Use settings dictionary to change kilosort settings for the run.
@@ -280,3 +290,332 @@ def analyze_ttl_timing(signal, threshold=-25000):
         print(f"\nNumber of pulses analyzed: {len(durations)}")
         print(f"Duration range: {np.min(durations):.2f} to {np.max(durations):.2f} samples")
         print(f"Spacing range: {np.min(spacings):.2f} to {np.max(spacings):.2f} samples")
+
+
+
+"""
+Preprocessing and loading functions
+"""
+
+def load_sniff_MATLAB(file: str) -> np.array:
+    '''
+    Loads a MATLAB file containing sniff data and returns a numpy array
+    '''
+
+    mat = loadmat(file)
+    sniff_params = mat['sniff_params']
+
+    # loading sniff parameters
+    inhalation_times = sniff_params[:, 0]
+    inhalation_voltage = sniff_params[:, 1]
+    exhalation_times = sniff_params[:, 2]
+    exhalation_voltage = sniff_params[:, 3]
+
+    # bad sniffs are indicated by 0 value in exhalation_times
+    bad_indices = np.where(exhalation_times == 0)
+
+
+    # removing bad sniffs
+    inhalation_times = np.delete(inhalation_times, bad_indices)
+    inhalation_voltage = np.delete(inhalation_voltage, bad_indices)
+    exhalation_times = np.delete(exhalation_times, bad_indices)
+    exhalation_voltage = np.delete(exhalation_voltage, bad_indices)
+
+    return inhalation_times.astype(np.int32), inhalation_voltage, exhalation_times.astype(np.int32), exhalation_voltage
+
+
+
+"""
+LFP Analysis helper functions
+"""
+
+def sniff_lock_lfp(locs: np.array, ephys: np.array, window_size = 1000, nsniffs = 512, beg = 3000, method = 'zscore') -> np.array:
+    '''
+    Aligns local field potential (LFP) signals with sniff inhalation times and constructs a 3D array of z-scored LFP activity.
+
+    This function identifies segments of LFP signals corresponding to inhalation times (specified by 'locs') and 
+    standardizes these segments across channels. The output is a 3D array where each 'slice' corresponds to the LFP 
+    activity surrounding a single sniff event, with data from all channels.
+
+    Parameters:
+    locs (np.array): Array of sniff inhalation times (indices).
+    ephys (np.array): 2D array of electrophysiological data with shape (nchannels, number_of_samples).
+    nchannels (int, optional): Number of channels in the ephys data. Defaults to 16.
+    window_size (int, optional): The size of the window around each sniff event to consider for LFP activity. Defaults to 1000.
+    nsniffs (int, optional): Number of sniff events to process. Defaults to 512.
+    beg (int, optional): Starting index to begin looking for sniff events. Defaults to 3000.
+
+    Returns:
+    sniff_activity (np.array): A 3D NumPy array with shape (nsniffs, window_size, nchannels). Each 'slice' of this array 
+              represents the z-scored LFP activity around a single sniff event for all channels.
+    loc_set (np.array): An array of indices where inhalation peaks are located.
+
+    Raises:
+    ValueError: If the 'locs' array does not contain enough data after the specified 'beg' index for the required number of sniffs.
+    '''
+
+
+    # finding number of channels
+    nchannels = ephys.shape[0]
+
+
+    # finding the set of inhalation times to use
+    if nsniffs == 'all':
+        loc_set = locs[5:-5]
+        nsniffs = len(loc_set)
+    elif isinstance(nsniffs, int):
+        first_loc = np.argmax(locs >= beg)
+        loc_set = locs[first_loc: first_loc + nsniffs]
+    else:
+        raise ValueError("nsniffs must be either 'all' or an integer.")
+
+    # checking if locs array has enough data for the specified range
+    if isinstance(nsniffs, int):
+        if len(loc_set) < nsniffs:
+            raise ValueError("locs array does not have enough data for the specified range.")
+        
+    # propogates an nx2 array containing times half the window size in both directions from inhalation times
+    windows = np.zeros((nsniffs, 2), dtype=int)
+    for ii in range(nsniffs):
+        win_beg = loc_set[ii] - round(window_size/2)
+        win_end = loc_set[ii] + round(window_size/2)
+        windows[ii] = [win_beg, win_end]
+
+    if method == 'zscore':
+        # finds and saves zscored ephys data from each channel for each inhalaion locked time window
+        sniff_activity = np.zeros((nchannels, nsniffs, window_size))
+        for ii in range(nsniffs):
+            for ch in range(nchannels):
+                win_beg, win_end = windows[ii]
+                data = ephys[ch, win_beg:win_end]
+                if len(data) == 0:
+                    zscore_data = np.zeros(window_size)
+                elif len(data) < window_size:
+                    data = np.pad(data, (0, window_size - len(data)), mode = 'constant', constant_values = 0)
+                    data_mean = np.mean(data)
+                    data_std = np.std(data)
+                    zscore_data = (data - data_mean) / data_std
+                else:
+                    data_mean = np.mean(data)
+                    data_std = np.std(data)
+                    zscore_data = (data - data_mean) / data_std
+                sniff_activity[ch,ii,:] = zscore_data
+
+    if method == 'custom':
+        # Same as z-score but does not subtract the mean
+        sniff_activity = np.zeros((nchannels, nsniffs, window_size))
+        for ii in range(nsniffs):
+            for ch in range(nchannels):
+                win_beg, win_end = windows[ii]
+                data = ephys[ch, win_beg:win_end]
+                if len(data) == 0:
+                    custom_data = np.zeros(window_size)
+                elif len(data) < window_size:
+                    data = np.pad(data, (0, window_size - len(data)), mode = 'constant', constant_values = 0)
+                    data_std = np.std(data)
+                    custom_data = (data) / data_std
+                else:
+                    data_std = np.std(data)
+                    custom_data = (data) / data_std
+                sniff_activity[ch,ii,:] = custom_data
+
+
+    elif method == 'none':
+        sniff_activity = np.zeros((nchannels, nsniffs, window_size))
+        for ii in range(nsniffs):
+            for ch in range(nchannels):
+                win_beg, win_end = windows[ii]
+                data = ephys[ch, win_beg:win_end]
+                if len(data) < window_size:
+                    data = np.pad(data, (0, window_size - len(data)), mode = 'constant', constant_values = 0)
+                    print('!!! padding !!!')
+                sniff_activity[ch,ii,:] = data
+
+    return sniff_activity, loc_set
+
+
+
+def sort_lfp(sniff_activity, locs):
+    '''sorts the sniff locked lfp trace by sniff frequency'''
+
+    # finding data shape
+    nchannels = sniff_activity.shape[0]
+    nsniffs = sniff_activity.shape[1]
+    window_size = sniff_activity.shape[2]
+    
+    sorted_activity = np.zeros((nchannels, nsniffs-1, window_size))
+    
+    # finding sniff frequencies by inhalation time differences (we lose the last sniff)
+    freqs = np.diff(locs)
+
+    # sorting the ephys data and frequency values according to these times
+    sort_indices = np.argsort(freqs)
+    sorted_activity[:, :, :] = sniff_activity[:, sort_indices, :]
+    sorted_freqs = freqs[sort_indices]
+    sorted_freqs = 1 / (sorted_freqs / 1000)
+    new_locs = locs[sort_indices]
+
+
+    return sorted_activity, sorted_freqs, new_locs, sort_indices
+
+
+def build_raster(lfp: np.array, inh: np.array, exh: np.array, save_path: str, filter: tuple = ('bandpass', [2, 12]), window_size: int = 2000, f: int = 1000):
+
+    custom_x=False
+    solojazz = load_colormap()
+
+    # plot with arial font
+    plt.rcParams['font.family'] = 'Arial'
+    sns.set_context('paper', font_scale=4)
+    
+    # filtering the LFP if filter is not a string
+    if not isinstance(filter, str):
+        sos = signal.butter(4, filter[1], filter[0], fs = 1000, output = 'sos')
+        lfp = signal.sosfiltfilt(sos, lfp)
+
+        if filter[1] == 'bandstop':
+            sos = signal.butter(4, 'highpass', 2, fs = 1000, output = 'sos')
+            lfp = signal.sosfiltfilt(sos, lfp)
+
+    # setting the parameters for the filter
+    if filter == 'gamma':
+        cmap = 'Greys'
+    else:
+        cmap = solojazz
+    vmax = 2
+
+    # extract the instantaneous frequency
+    freqs = f / np.diff(inh)
+    inh = inh[:-1]
+    exh = exh[:-1]
+
+    # cleaning frequency data
+    bad_indicies = np.where((freqs < 0) | (freqs > 16))
+    freqs = np.delete(freqs, bad_indicies)
+    inh = np.delete(inh, bad_indicies)
+
+    # aligning the LFPs to sniff times
+    print('Sniff locking LFP')
+    sniff_activity, loc_set = sniff_lock_lfp(inh, lfp, method = 'custom', window_size=window_size, nsniffs='all')
+    if sniff_activity.shape[1] < 10:
+        print('Not enough sniffs')
+        return
+    
+    sorted_activity, sorted_freqs, loc_set, sort_indices = sort_lfp(sniff_activity, loc_set)
+
+
+    # looping through the channels and plotting the data
+    for ch in range(sorted_activity.shape[0]):
+        if filter == 'gamma':
+            vmin = 0
+            vmax = 4
+        else:
+            vmin = -vmax
+
+       
+        # keeping only the middle 1000 points of the sorted_activity
+        middle_index = window_size // 2
+        sorted_activity = sorted_activity[:, :, middle_index - 500: middle_index + 500]
+
+
+        # plot inhalation time aligned, time-domain LFP activity
+        _, ax = plt.subplots(figsize = (10, 8))
+        sns.heatmap(sorted_activity[ch, :, :], cmap = cmap, robust = True, vmin = vmin, vmax = vmax, rasterized = True)
+        
+        # plotting line to indicate the current and the next inhalation
+        plt.axvline(500, color = 'black', alpha = 0.8)
+        next_inhale = np.zeros(len(sorted_freqs))
+        for i in range(len(sorted_freqs)):
+            next_inhale[i] = 500 + 1000 // sorted_freqs[i]
+        sns.lineplot(x = next_inhale, y = np.arange(len(sorted_freqs)), color = 'black', alpha = 0.8)
+        
+        #only showing 3 ticks on colorbar, the top middle and bottom
+        cbar = ax.collections[0].colorbar
+        cbar.set_ticks([vmin, (vmin + vmax) // 2, vmax])
+        cbar.set_ticklabels([f'{int(vmin)}', f'{int((vmin + vmax) // 2)}', f'{int(vmax)}'])
+        cbar.ax.yaxis.set_tick_params(length=0)
+
+        # adjusting the axis
+        if custom_x:
+            ax.set_xticks([0, 1000])
+            ax.set_xticklabels(['', ''])
+        else:
+            ax.set_xticks([0, window_size //2, window_size])
+            ax.set_xticklabels([-window_size // 2, 0, window_size // 2], rotation = 0)
+
+        # remove y ticks and labels
+        ax.set_yticks([])
+
+        plt.savefig(os.path.join(save_path, f'Channel_{ch}_LFP.png'), dpi = 300)
+        plt.close()
+
+
+
+def process_filter(args):
+
+    matplotlib.use('Agg')
+
+    ephys, inh_use, exh_use, filter_info, save_path = args
+    filter_name, filter_params = filter_info
+    
+    current_save_path = os.path.join(save_path, filter_name)
+    os.makedirs(current_save_path, exist_ok=True)
+
+    # Filter the ephys data
+    print(f"Filtering with {filter_name} filter")
+    if filter_params[0] is not None:
+        sos = signal.butter(4, filter_params[1], filter_params[0], fs=1000, output='sos')
+        ephys_filtered = signal.sosfiltfilt(sos, ephys)
+    else:
+        ephys_filtered = ephys
+
+    if filter_name == 'gamma':
+        ephys_filtered = np.abs(signal.hilbert(ephys_filtered))
+
+    # Build raster
+    print(f"Building raster")
+    build_raster(ephys_filtered, inh_use, exh_use, current_save_path, 
+                            filter=filter_name, window_size=1000, f=1000)
+
+
+
+def build_sniff_rasters(ephys: np.array, inh: np.array, exh: np.array, save_path: str, max_workers: int = 2):
+    
+    filters = {
+        'raw': (None, None),
+        'theta': ('bandpass', (2, 12)),
+        'beta': ('bandpass', (18, 30)),
+        'gamma': ('bandpass', (65, 100))}
+
+    # Create processing tasks
+    tasks = []
+    for filter_name, filter_params in filters.items():
+        tasks.append((ephys, inh, exh, (filter_name, filter_params), save_path))
+
+    # Process in parallel
+    with ProcessPoolExecutor(max_workers = max_workers) as executor:
+        list(executor.map(process_filter, tasks))
+
+        
+
+"""
+Colormap and plotting functions
+"""
+
+    
+
+def load_colormap(cmap = 'smoothjazz'):
+    # Load the .mat file
+    if cmap == 'smoothjazz':
+        mat_file = "E:\\Sid_LFP\\solojazz.mat"
+        data = loadmat(mat_file)["pmc"]
+    elif cmap == 'burningchrome':
+        csv_file = "E:\\Sid_LFP\\burning_chrome.csv"
+        data = pd.read_csv(csv_file, header=None).values
+        
+    
+    # Create a custom colormap
+    colormap = mcolors.ListedColormap(data, name="solojazz")
+
+    return colormap
+
