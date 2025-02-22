@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from scipy.ndimage import gaussian_filter1d
+from tqdm import tqdm
 
 
 """
@@ -388,6 +389,7 @@ def compute_spike_rates_sliding_window_by_region_smooth(kilosort_dir: str, sampl
     - unit_ids_OB (np.ndarray): OB Unit IDs.
     - unit_ids_HC (np.ndarray): HC Unit IDs.
     """
+
 
     # Load spike times and cluster assignments
     spike_times_path = os.path.join(kilosort_dir, "spike_times.npy")
@@ -769,7 +771,7 @@ def build_sniff_rasters(ephys: np.array, inh: np.array, exh: np.array, save_path
 
 
 
-def compute_multichannel_psd(lfp_data, fs=1000, nperseg=4000, noverlap=2000, method="mean_psd"):
+def compute_multichannel_psd(lfp_data, fs=1000, nperseg=4000, noverlap=2000, nfft = 4096, method="mean_psd", plot_dir=None, region=None, sensitivity = 5):
     """
     Computes the Power Spectral Density (PSD) across multiple LFP channels.
 
@@ -797,31 +799,167 @@ def compute_multichannel_psd(lfp_data, fs=1000, nperseg=4000, noverlap=2000, met
 
     # Initialize storage for per-channel PSD
     psds = []
+    noisy_channels = []
+
+    if plot_dir:
+        sns.set_context('talk')
+        plt.style.use('dark_background')
+        plt.figure(figsize=(20, 10))
 
     # Compute PSD for each channel
     for ch in range(lfp_data.shape[0]):
-        freqs, psd = signal.welch(lfp_data[ch], fs=fs, nperseg=nperseg, noverlap=noverlap, window='hann')
+        freqs, psd = signal.welch(lfp_data[ch], fs=fs, nperseg=nperseg, noverlap=noverlap, nfft = nfft, window='hann')
         psds.append(psd)
+
+        # check if there is a peak at 60Hz
+        target_freq = 60  # Hz
+        idx_60hz = np.argmin(np.abs(freqs - target_freq))  # Closest index to 60Hz
+        psd_60hz = psd[idx_60hz]
+
+        # Compute local median around 60Hz (excluding the peak itself)
+        nearby_idxs = (freqs > target_freq - 10) & (freqs < target_freq + 10)  # 10Hz window
+        nearby_psd = psd[nearby_idxs]
+        median_power = np.median(nearby_psd)
+
+        # Check if 60Hz peak is significantly higher than surrounding noise
+        if psd_60hz > sensitivity * median_power:
+            noisy_channels.append(ch)  # Mark channel as noisy
+        
+
+
+
+        if plot_dir:
+            sns.lineplot(x=freqs, y=psd, label=f'Channel {ch + 1}', alpha = 0.8)
+
+    if plot_dir:
+
+        # plot thin dotted lines at 60Hz and harmonics
+        for i in range(1, 7):
+            plt.axvline(x=60 * i, color='crimson', linestyle='dotted', alpha = 0.5)
+        plt.title(f'{region} power spectral density across channels')
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Power/Frequency (dB/Hz)')
+        #plt.xscale('log')
+        plt.yscale('log')
+        #plt.xticks(ticks=[1, 10, 100], labels=['1', '10', '100'])
+        sns.despine()
+        plt.legend(fontsize = 12)
+        plt.savefig(os.path.join(plot_dir), dpi=300)
+        plt.close()
 
     psds = np.array(psds)  # Shape: (16, frequencies)
 
     if method == "mean_psd":
         # Compute the average PSD across all channels
         psd_avg = np.mean(psds, axis=0)
-        return freqs, psd_avg
+        return freqs, psd_avg, noisy_channels
 
     elif method == "psd_of_mean":
         # Compute PSD of the averaged LFP signal
         lfp_mean = np.mean(lfp_data, axis=0)
         freqs, psd_mean = signal.welch(lfp_mean, fs=fs, nperseg=nperseg, noverlap=noverlap, window='hann')
-        return freqs, psd_mean
+        return freqs, psd_mean, noisy_channels
 
     elif method == "per_channel":
         # Return PSD for each channel separately
-        return freqs, psds
+        return freqs, psds, noisy_channels
 
     else:
         raise ValueError("Invalid method. Choose 'mean_psd', 'psd_of_mean', or 'per_channel'.")
+    
+
+
+def compute_multichannel_psd_noiseremoved(
+    lfp_data, fs=1000, nperseg=4000, noverlap=2000, nfft=4096, method="mean_psd", 
+    plot_dir=None, region=None, sensitivity=5.0
+):
+    """
+    Computes the Power Spectral Density (PSD) across multiple LFP channels and detects 60Hz noise.
+    Plots noisy channels in red and good channels in green.
+
+    Parameters:
+    - lfp_data (np.ndarray): 2D array of shape (channels, time) containing LFP data.
+    - fs (int): Sampling rate in Hz (default = 1000 Hz).
+    - nperseg (int): Segment length for Welch's method (default = 4s segments at 1kHz = 4000 samples).
+    - noverlap (int): Overlapping samples between segments (default = 50% overlap = 2000 samples).
+    - method (str): Method for combining PSD across channels.
+    - plot_dir (str, optional): Directory to save PSD plots.
+    - region (str, optional): Brain region name.
+    - sensitivity (float): Controls peak detection sensitivity (higher = stricter).
+
+    Returns:
+    - freqs (np.ndarray): Frequency values in Hz.
+    - psd (np.ndarray): PSD values (computed using only good channels).
+    - noisy_channels (list): List of channel indices with significant 60Hz noise.
+    """
+
+    # Ensure input is a NumPy array
+    lfp_data = np.asarray(lfp_data)
+
+    # Number of channels
+    num_channels = lfp_data.shape[0]
+
+    # Initialize storage for PSDs
+    psds = []
+    noisy_channels = []
+    good_channels = []
+
+    if plot_dir:
+        sns.set_context('talk')
+        plt.style.use('dark_background')
+        plt.figure(figsize=(20, 10))
+
+    # Compute PSD for each channel and detect 60Hz noise
+    for ch in range(num_channels):
+        freqs, psd = signal.welch(lfp_data[ch], fs=fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft, window='hann')
+        psds.append(psd)
+
+        # Detect 60Hz noise
+        target_freq = 60  # Hz
+        idx_60hz = np.argmin(np.abs(freqs - target_freq))  # Closest index to 60Hz
+        psd_60hz = psd[idx_60hz]
+
+        # Compute local median around 60Hz (excluding the peak itself)
+        nearby_idxs = (freqs > target_freq - 10) & (freqs < target_freq + 10)  # 10Hz window
+        nearby_psd = psd[nearby_idxs]
+        median_power = np.median(nearby_psd)
+
+        # Mark as noisy if 60Hz peak is significantly higher than surrounding noise
+        if psd_60hz > sensitivity * median_power:
+            noisy_channels.append(ch)  # Mark as noisy
+            color = 'red'
+        else:
+            good_channels.append(ch)  # Mark as good
+            color = 'green'
+
+        if plot_dir:
+            sns.lineplot(x=freqs, y=psd, color=color, alpha=0.8, label=f'Channel {ch + 1}')
+
+    if plot_dir:
+        # Plot vertical dotted lines at 60Hz and harmonics
+        plt.axvline(x=60, color='crimson', linestyle='dotted', alpha=0.3)
+
+        plt.title(f'{region} power spectral density across channels')
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Power/Frequency (dB/Hz)')
+        plt.xscale('log')
+        plt.yscale('log')
+        plt.xticks(ticks=[1, 10, 100], labels=['1', '10', '100'])
+        sns.despine()
+        plt.legend(fontsize=12)
+        plt.savefig(os.path.join(plot_dir), dpi=300)
+        plt.close()
+
+    psds = np.array(psds)  # Shape: (channels, frequencies)
+
+    # Use only good channels for PSD computation
+    if len(good_channels) > 0:
+        psd_final = np.mean(psds[good_channels], axis=0)  # Average PSD across good channels
+    else:
+        print("Warning: No clean channels detected, returning none.")
+        psd_final = None
+
+    return freqs, psd_final, noisy_channels
 
 
 
@@ -1052,7 +1190,7 @@ def plot_sniff_frequencies(time_bins: np.ndarray, mean_freqs: np.ndarray,
 
 def plot_embedding_2d(embedding_OB: np.ndarray, label: np.ndarray, region: str, method: str, 
                       dark_mode: bool = True, global_font: str = "Arial", global_font_size: int = 14,
-                      save_path: str = None, show: bool = True):
+                      save_path: str = None, show: bool = True, colorbar_title = None, colorbar_range = None):
     """
     Plots a 2D embedding using Plotly with color-coded sniff frequency.
     """
@@ -1071,9 +1209,9 @@ def plot_embedding_2d(embedding_OB: np.ndarray, label: np.ndarray, region: str, 
     fig = px.scatter(
         x=embedding_OB[:, 0], 
         y=embedding_OB[:, 1], 
-        color=label, range_color=[2, 12],
+        color=label, range_color=colorbar_range,
         color_continuous_scale='plasma', 
-        labels={'color': 'Sniffs per second'},
+        labels={'color': colorbar_title},
         title=f"{method} embedding of {region} spike rates"
     )
     
@@ -1148,7 +1286,7 @@ def plot_embedding_2d(embedding_OB: np.ndarray, label: np.ndarray, region: str, 
 
 def plot_embedding_3d(embedding: np.ndarray, labels: np.ndarray, region: str, method: str, 
                       dark_mode: bool = True, global_font: str = "Arial", global_font_size: int = 14,
-                      save_path: str = None, show: bool = True):
+                      save_path: str = None, show: bool = True, colorbar_title = None, colorbar_range = None):
     """
     Plots a 3D embedding using Plotly with transparent background and an orthogonal axis.
     """
@@ -1159,8 +1297,8 @@ def plot_embedding_3d(embedding: np.ndarray, labels: np.ndarray, region: str, me
     
     # Create scatter plot
     fig = px.scatter_3d(
-        x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2], range_color=[2, 12],
-        color=labels, title=f"{method} embedding of {region} spike rates", labels={'color': 'Sniffs per second'}, 
+        x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2], range_color=colorbar_range,
+        color=labels, title=f"{method} embedding of {region} spike rates", labels={'color': colorbar_title}, 
         color_continuous_scale='plasma'
     )
     
@@ -1232,7 +1370,7 @@ def plot_PSD(ob_data, hc_data, save_dir, dark_mode=True):
     
 
     bandwidths = {'theta': [2, 12], 'beta': [18, 30], 'gamma': [65, 100]}
-    freq_range = [1, 100]
+    freq_range = [1, 300]
 
 
 
@@ -1258,6 +1396,10 @@ def plot_PSD(ob_data, hc_data, save_dir, dark_mode=True):
     plt.xscale('log')
     sns.despine()
 
+    # setting y scale
+    if dark_mode:
+        plt.ylim(1, 10**6)
+
     # shading the bandwidths of interest and adding Greek letters
     greek_letters = {'theta': '$\\theta$', 'beta': '$\\beta$', 'gamma': '$\\gamma$'}
     y_max = plt.gca().get_ylim()[1]
@@ -1272,7 +1414,7 @@ def plot_PSD(ob_data, hc_data, save_dir, dark_mode=True):
                 color=bandcolor,
                 fontsize=24)
     
-    plt.xticks([2, 12, 18, 30, 65, 100], [2, 12, 18, 30, 65, 100])
+    plt.xticks([1, 2, 12, 18, 30, 65, 100, 300], [1, 2, 12, 18, 30, 65, 100, 300])
 
     plt.savefig(os.path.join(save_dir, f'Combined_psd_logx_letters_ticks.png'), format='png', dpi=600)
     plt.savefig(os.path.join(save_dir, f'Combined_psd_logx_letters_ticks.svg'), format='svg')
