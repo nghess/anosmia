@@ -167,7 +167,7 @@ def load_behavior(behavior_file: str):
     events['speed'] = np.sqrt(events['velocity_x']**2 + events['velocity_y']**2)
 
     # keeping only the columns we need
-    events = events[['centroid_x', 'centroid_y', 'velocity_x', 'velocity_y', 'speed', 'timestamp_ms']]
+    events = events[['centroid_x', 'centroid_y', 'velocity_x', 'velocity_y', 'reward_state', 'speed', 'timestamp_ms']]
     return events
 
 
@@ -477,7 +477,7 @@ def compute_spike_latency(kilosort_dir: str, sampling_rate: int, use_units: str 
     return spike_latency_matrix_OB, spike_latency_matrix_HC, time_bins, ob_units, hc_units
 
 
-def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, units: np.ndarray, time_bins: np.ndarray, window_size: float = 0.1, speed_threshold: float = 4.0):
+def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, units: np.ndarray, time_bins: np.ndarray, window_size: float = 0.1, speed_threshold: float = 100, interp_method = 'linear', order = None):
     
     """
     Align neural spike rate data with behavioral tracking data using time windows.
@@ -536,6 +536,7 @@ def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, unit
     mean_velocities_x = np.full(len(time_bins), np.nan)
     mean_velocities_y = np.full(len(time_bins), np.nan)
     mean_speeds = np.full(len(time_bins), np.nan)
+    mean_rewards = np.full(len(time_bins), np.nan)
 
     # getting event times in seconds
     event_times = events['timestamp_ms'].values / 1000
@@ -552,12 +553,14 @@ def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, unit
             mean_velocities_x[i] = events['velocity_x'].iloc[nearest_event_index]
             mean_velocities_y[i] = events['velocity_y'].iloc[nearest_event_index]
             mean_speeds[i] = events['speed'].iloc[nearest_event_index]
+            mean_rewards[i] = events['reward_state'].iloc[nearest_event_index]
         else:
             mean_positions_x[i] = np.nan
             mean_positions_y[i] = np.nan
             mean_velocities_x[i] = np.nan
             mean_velocities_y[i] = np.nan
             mean_speeds[i] = np.nan
+            mean_rewards[i] = np.nan
 
 
     # converting the spike rate matrix to a DataFrame
@@ -571,13 +574,13 @@ def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, unit
     data['v_y'] = mean_velocities_y / conversion # convert to cm/s
     data['speed'] = mean_speeds * conversion # convert to cm/s
     data['time'] = time_bins # in seconds
+    data['reward_state'] = mean_rewards
 
-    # Removing outlier tracking data by filtering based on speed
-    threshold = data['speed'].std() * speed_threshold
-    data.loc[data['speed'] > threshold, ['x', 'y', 'v_x', 'v_y', 'speed']] = np.nan
+    
+    data.loc[data['speed'] > speed_threshold, ['x', 'y', 'v_x', 'v_y', 'speed']] = np.nan
 
     # interpolating the tracking data to fill in NaN values
-    data.interpolate(method='linear', inplace=True)
+    data.interpolate(method=interp_method, inplace=True, order = order)
 
     return data
 

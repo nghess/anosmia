@@ -310,7 +310,7 @@ def plot_2d_embedding_with_position_colors(embedding, positions, position_x_rang
     return fig
 
 
-def plot_3d_embedding_with_position_colors(embedding, positions, region="Brain Region", method="Embedding", 
+def plot_3d_embedding_with_position_colors(embedding, positions, position_x_range, position_y_range, region="Brain Region", method="Embedding", 
                                dark_mode=True, global_font="Arial", global_font_size=14,
                                save_path=None, show=True):
     """
@@ -341,9 +341,6 @@ def plot_3d_embedding_with_position_colors(embedding, positions, region="Brain R
     font_color = "white" if dark_mode else "black"
     background_color = "rgba(0,0,0,0)"  # Transparent
     
-    # Get the position range from the data
-    position_x_range = (-60, 60)  # Adjust based on your actual data range
-    position_y_range = (-150, 150)  # Adjust based on your actual data range
     
     # Get colors for the positions
     colors, rgb_values = position_to_color(
