@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 
 
 
+
 """
 preprocessing functions
 """
@@ -60,7 +61,6 @@ def prepare_latencies_for_kalman(latency_matrix, method: str = 'log', max_latenc
 """
 Train test split
 """
-
 def cv_split(data, k, k_CV=10, n_blocks=10):
     '''
     Perform cross-validation split of the data, following the Hardcastle et 
@@ -82,7 +82,7 @@ def cv_split(data, k, k_CV=10, n_blocks=10):
     --
     data_train, data_test, switch_indices : 
         - Data arrays after performing the train/test split
-        - Indices in the test data where new blocks begin
+        - Indices in the train and test data where new blocks begin
     '''
 
     block_size = len(data)//n_blocks
@@ -90,6 +90,7 @@ def cv_split(data, k, k_CV=10, n_blocks=10):
     
     # Keep track of which indices in the original data are the start of test blocks
     test_block_starts = []
+    train_block_starts = []
     
     for block in range(n_blocks):
         i_start = int((block + k/k_CV)*block_size)
@@ -100,18 +101,26 @@ def cv_split(data, k, k_CV=10, n_blocks=10):
     mask_train = [not a for a in mask_test]
     data_test = data[mask_test]
     data_train = data[mask_train]
-    
-    # Convert original data indices to indices in the test data
-    switch_indices = []
-    current_test_idx = 0
-    
-    for i in range(len(data)):
+
+    train_switch_indices = [0]
+    test_switch_indices = [0]
+    train_count = 0
+    test_count = 0
+    for i in range(len(data)-1):
+        if mask_train[i]:
+            train_count += 1
         if mask_test[i]:
-            if i in test_block_starts:
-                switch_indices.append(current_test_idx)
-            current_test_idx += 1
+            test_count += 1
+        if not mask_train[i] and mask_train[i + 1]:
+            train_switch_indices.append(train_count)
+        if not mask_test[i] and mask_test[i + 1]:
+            test_switch_indices.append(test_count)
+
+    train_switch_indices = np.unique(train_switch_indices)
+    test_switch_indices = np.unique(test_switch_indices)
+
     
-    return data_train, data_test, switch_indices
+    return data_train, data_test, train_switch_indices, test_switch_indices
 
 
 """
@@ -374,3 +383,8 @@ class KalmanFilterDecoder:
 """
 Plotting functions
 """
+
+
+"""Helper functions
+"""
+

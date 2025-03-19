@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy.signal as signal
 from plotting import load_colormap
+import h5py
 import os
 
 
@@ -117,7 +118,7 @@ def compute_sniff_freqs_bins(sniff_params_file:str, time_bins:np.ndarray, window
     return mean_freqs, inhalation_latencies
 
 
-def load_behavior(behavior_file: str):
+def load_behavior(behavior_file: str, tracking_file: str = None) -> pd.DataFrame:
 
     """
     Load and preprocess behavioral tracking data from a CSV file.
@@ -155,19 +156,30 @@ def load_behavior(behavior_file: str):
     # Load the behavior data
     events = pd.read_csv(os.path.join(behavior_file, 'events.csv'))
 
-    # zero-mean normalize the x and y coordinates
-    mean_x = np.mean(events['centroid_x'])
-    mean_y = np.mean(events['centroid_y'])
-    events['centroid_x'] = events['centroid_x'] - mean_x
-    events['centroid_y'] = events['centroid_y'] - mean_y
+    if tracking_file:
+        # Load the SLEAP tracking data from the HDF5 file
+        f = h5py.File(tracking_file, 'r')
+        nose = f['tracks'][:].T[:, 0, :]
+        nose = nose[:np.shape(events)[0], :]
+        mean_x, mean_y = np.nanmean(nose[:, 0]), np.nanmean(nose[:, 1])
+        events['position_x'] = nose[:, 0] - mean_x
+        events['position_y'] = nose[:, 1] - mean_y
+        
+    else:
+        # zero-mean normalize the x and y coordinates
+        mean_x, mean_y = np.nanmean(events['centroid_x']), np.nanmean(events['centroid_y'])
+        events['position_x'] = events['centroid_x'] - mean_x
+        events['position_y'] = events['centroid_y'] - mean_y
 
     # Estimating velocity and speed
-    events['velocity_x'] = np.diff(events['centroid_x'], prepend=events['centroid_x'].iloc[0])
-    events['velocity_y'] = np.diff(events['centroid_y'], prepend=events['centroid_y'].iloc[0])
+    events['velocity_x'] = np.diff(events['position_x'], prepend=events['position_x'].iloc[0])
+    events['velocity_y'] = np.diff(events['position_y'], prepend=events['position_y'].iloc[0])
     events['speed'] = np.sqrt(events['velocity_x']**2 + events['velocity_y']**2)
 
+
+
     # keeping only the columns we need
-    events = events[['centroid_x', 'centroid_y', 'velocity_x', 'velocity_y', 'reward_state', 'speed', 'timestamp_ms']]
+    events = events[['position_x', 'position_y', 'velocity_x', 'velocity_y', 'reward_state', 'speed', 'timestamp_ms']]
     return events
 
 
@@ -548,8 +560,8 @@ def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, unit
 
         if np.any(event_times < middle):
             nearest_event_index = np.argmin(np.abs(event_times - middle))
-            mean_positions_x[i] = events['centroid_x'].iloc[nearest_event_index]
-            mean_positions_y[i] = events['centroid_y'].iloc[nearest_event_index]
+            mean_positions_x[i] = events['position_x'].iloc[nearest_event_index]
+            mean_positions_y[i] = events['position_y'].iloc[nearest_event_index]
             mean_velocities_x[i] = events['velocity_x'].iloc[nearest_event_index]
             mean_velocities_y[i] = events['velocity_y'].iloc[nearest_event_index]
             mean_speeds[i] = events['speed'].iloc[nearest_event_index]
@@ -572,7 +584,7 @@ def align_brain_and_behavior(events: pd.DataFrame, spike_rates: np.ndarray, unit
     data['y'] = mean_positions_y / conversion # convert to cm
     data['v_x'] = mean_velocities_x / conversion # convert to cm/s
     data['v_y'] = mean_velocities_y / conversion # convert to cm/s
-    data['speed'] = mean_speeds * conversion # convert to cm/s
+    data['speed'] = mean_speeds / conversion # convert to cm/s
     data['time'] = time_bins # in seconds
     data['reward_state'] = mean_rewards
 
@@ -772,7 +784,6 @@ def build_raster(lfp: np.array, inh: np.array, exh: np.array, save_path: str, fi
     sorted_activity, sorted_freqs, loc_set, sort_indices = sort_lfp(sniff_activity, loc_set)
 
 
-    # looping through the channels and plotting the data
     for ch in range(sorted_activity.shape[0]):
         if filter == 'gamma':
             vmin = 0
@@ -780,7 +791,7 @@ def build_raster(lfp: np.array, inh: np.array, exh: np.array, save_path: str, fi
         else:
             vmin = -vmax
 
-       
+    
         # keeping only the middle 1000 points of the sorted_activity
         middle_index = window_size // 2
         sorted_activity = sorted_activity[:, :, middle_index - 500: middle_index + 500]

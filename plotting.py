@@ -40,7 +40,7 @@ def load_colormap(cmap = 'smoothjazz', type: str = 'matplotlib'):
 def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.ndarray, 
                      ob_units: np.ndarray, hc_units: np.ndarray, dark_mode: bool = True, 
                      global_font: str = "Arial", global_font_size: int = 14, 
-                     show: bool = True, save_path: str = None, normalized: bool = False, cmap = 'Magma'):
+                     show: bool = True, save_path: str = None, normalized: bool = False, cmap = 'Magma', step: int = 1, title = "Spike rates in olfactory bulb and hippocampus units", log_scale = False):
     """
     Plots spike rates for OB and HC units using Plotly as two separate heatmaps stacked vertically with a transparent background.
     Ensures both heatmaps share the same color scale and only one colorbar is displayed.
@@ -48,16 +48,39 @@ def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.n
 
     # Determine font and axis color
     font_color = "white" if dark_mode else "black"
-    
 
 
-    if normalized:
-        colorbar_title = "Spike rate (z)"
-        vmin, vmax = -2, 3
+       # Handle log transformation if requested
+    if log_scale:
+        # Add small epsilon to avoid log(0)
+        epsilon = 1e-10
+        rates_OB_plot = np.log(rates_OB + epsilon)
+        rates_HC_plot = np.log(rates_HC + epsilon)
+        
+        if normalized == True:
+            colorbar_title = "Log Spike rate (z)"
+        elif normalized == 'latency':
+            colorbar_title = "Log Spike latency (s)"
+            vmin, vmax = 0, 0.1
+        else:
+            colorbar_title = "Log Spike rate (Hz)"
+            
+        vmin = -7
+        vmax = 0
     else:
-        colorbar_title = "Spike rate (Hz)"
-        vmin = np.min(np.concatenate((rates_OB, rates_HC)))
-        vmax = np.max(np.concatenate((rates_OB, rates_HC)))
+        rates_OB_plot = rates_OB
+        rates_HC_plot = rates_HC
+        
+        if normalized == True:
+            colorbar_title = "Spike rate (z)"
+            vmin, vmax = -2, 3
+        elif normalized == 'latency':
+            colorbar_title = "Spike latency (s)"
+            vmin, vmax = 0, 0.1
+        else:
+            colorbar_title = "Spike rate (Hz)"
+            vmin = np.min(np.concatenate((rates_OB, rates_HC)))
+            vmax = np.max(np.concatenate((rates_OB, rates_HC)))
 
 
 
@@ -71,8 +94,8 @@ def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.n
 
     # Create OB heatmap
     heatmap_OB = go.Heatmap(
-        z=rates_OB,
-        x=time_bins,
+        z=rates_OB_plot[:, ::step],
+        x=time_bins[::step],
         y=np.arange(len(ob_units)),
         colorscale=cmap,
         zmin=vmin, zmax=vmax,  
@@ -82,8 +105,8 @@ def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.n
 
     # Create HC heatmap without colorbar
     heatmap_HC = go.Heatmap(
-        z=rates_HC,
-        x=time_bins,
+        z=rates_HC_plot[:, ::step],
+        x=time_bins[::step],
         y=np.arange(len(hc_units)),
         colorscale=cmap,
         zmin=vmin, zmax=vmax,  
@@ -126,7 +149,7 @@ def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.n
     # Update title
     fig.update_layout(
         title=dict(
-            text="Spike rates in olfactory bulb and hippocampus units",
+            text=title,
             font=dict(family=global_font, size=global_font_size + 10, color=font_color), 
             xanchor="left",
             yanchor="top",
@@ -158,8 +181,6 @@ def plot_raw_signals(lfp, theta, mua, sniff,channel, seg, mouse, session, save_p
     for i, (label, data) in enumerate(signals.items()):
         if label in ['LFP', 'MUA']:
             ax[i].plot(time_axis, data[channel, seg:seg + length * fs], color=colors[label], linewidth=0.5, alpha =0.7)
-            if label == 'LFP':
-                ax[i].plot()
         else:
             ax[i].plot(time_axis, data[seg:seg + length * fs], color=colors[label], linewidth=0.8)
 
@@ -174,8 +195,11 @@ def plot_raw_signals(lfp, theta, mua, sniff,channel, seg, mouse, session, save_p
     ax[-1].set_xlabel('Time (s)')
 
     # Setting x-ticks and labels
-    ax[-1].set_xticks(np.arange(0, length + 0.5, 0.5))
-    ax[-1].set_xticklabels(np.arange(seg/fs, seg/fs + length + 0.5, 0.5, dtype=int))
+    xticks= np.arange(0, length + 0.5, 0.5)
+    start_time = seg / fs
+    xtick_labels = [f"{start_time + x:.1f}" for x in xticks]
+    ax[-1].set_xticks(xticks)
+    ax[-1].set_xticklabels(xtick_labels)
     sns.despine()
     plt.savefig(save_path, dpi=300)
     plt.close()
@@ -373,7 +397,7 @@ def plot_position_trajectories(data, save_path=None):
     colors = cmap(norm(data['time'].values))
 
     # Plot
-    fig, ax = plt.subplots(figsize=(5, 10))
+    fig, ax = plt.subplots(figsize=(20, 20))
     lc = LineCollection(segments, cmap=cmap, norm=norm, linewidth=1)
     lc.set_array(data['time'])
     ax.add_collection(lc)
@@ -390,6 +414,8 @@ def plot_position_trajectories(data, save_path=None):
     # Colorbar
     cbar = plt.colorbar(lc, ax=ax)
     cbar.set_label("Time (s)", rotation=270)
+
+    plt.tight_layout()
 
 
     if save_path:
