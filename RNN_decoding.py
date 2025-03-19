@@ -6,11 +6,11 @@ from plotting import plot_position_trajectories
 import os
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import seaborn as sns
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib
-from numpy.lib.stride_tricks import sliding_window_view
+
 
 
 class LSTMDecoder(nn.Module):
@@ -24,7 +24,7 @@ class LSTMDecoder(nn.Module):
         return self.fc(lstm_out[:, -1, :])
     
 
-def train_LSTM(model, X, y, lr=0.01, epochs=1000, patience=50, min_delta=1, factor=0.1):
+def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, min_delta=1, factor=0.1):
     """
     Train the LSTM model with early stopping and learning rate scheduling.
     
@@ -67,17 +67,22 @@ def train_LSTM(model, X, y, lr=0.01, epochs=1000, patience=50, min_delta=1, fact
     # Training the model
     history = []
     for epoch in range(epochs):
-        # Training
         model.train()
-        optimizer.zero_grad()
-        outputs = model(X)
-        loss = criterion(outputs, y)
-        loss.backward()
-        optimizer.step()
+        epoch_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(X_batch.to(device))
+            loss = criterion(outputs, y_batch.to(device))
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * X_batch.size(0)
+
+        # Average loss
+        epoch_loss /= len(train_loader.dataset)
 
         # Evaluation and early stopping
-        if loss.item() < best_loss - min_delta:
-            best_loss = loss.item()
+        if epoch_loss < best_loss - min_delta:
+            best_loss = epoch_loss
             best_model_state = model.state_dict().copy()  # Save a copy of the model state
             counter = 0
         else:
@@ -85,79 +90,54 @@ def train_LSTM(model, X, y, lr=0.01, epochs=1000, patience=50, min_delta=1, fact
             if counter >= patience:
                 break
 
-        # Learning rate scheduler
-        scheduler.step(loss)
+        # Learning rate scheduler and history
+        scheduler.step(epoch_loss)
+        history.append(epoch_loss)
 
-        history.append(loss.item())
+ 
+        print(f"Epoch {epoch} - Loss: {epoch_loss:.4f}")
 
-    
     # Load the best model
     model.load_state_dict(best_model_state)
     
     return model, history
     
 
-def create_sequences(data, sequence_length):
-    """
-    Vectorized creation of overlapping sequences using sliding_window_view.
+class SequenceDataset(Dataset):
+    def __init__(self, rates, behavior, blocks, sequence_length):
+        # Pre-convert to torch tensors once
+        self.rates = torch.tensor(rates, dtype=torch.float32)
+        self.behavior = torch.tensor(behavior, dtype=torch.float32)
+        self.sequence_length = sequence_length
+        self.indices = []
+        for start, end in blocks:
+            for i in range(start, end - sequence_length):
+                self.indices.append(i)
     
-    Parameters
-    ----------
-    data : np.array, shape (T, n)
-        The input time-series data.
-    sequence_length : int
-        The length of each sequence.
+    def __len__(self):
+        return len(self.indices)
     
-    Returns
-    -------
-    X : np.array, shape (T - sequence_length, sequence_length, n)
-        The overlapping sequences.
-    y : np.array, shape (T - sequence_length, n)
-        The labels (next time step following each sequence).
-    """
-    T, n = data.shape
-    if T <= sequence_length:
-        return np.empty((0, sequence_length, n)), np.empty((0, n))
-    
-    # Create a sliding window view over the time dimension.
-    X = sliding_window_view(data, window_shape=(sequence_length, n))
-    X = X.reshape(-1, sequence_length, n)
-    y = data[sequence_length:]
-    return X, y
-
-
-def prepare_sequences(X, y, sequence_length, switch_ind):
-
-    X_lstm = []
-    y_lstm = []
-    for block in range(len(switch_ind) - 1):
-        start = switch_ind[block]
-        end = switch_ind[block + 1]
-
-        # Create sequences for the current block
-        X_block = X[start:end, :]
-        y_block = y[start:end, :][]
-        X_block, _ = create_sequences(X_block, sequence_length)
-        y_block = y_block[sequence_length:]
-        
-        # Append to the training data
-        X_train_lstm.append(X_block)
-        y_train_lstm.append(y_block)
-
-    # Concatenate all blocks
-    X_train_lstm = np.concatenate(X_train_lstm, axis=0)
-    y_train_lstm = np.concatenate(y_train_lstm, axis=0)
-
-    # Convert the training data to tensors
-    X_train_lstm = torch.tensor(X_train_lstm, dtype=torch.float32)
-    y_train_lstm = torch.tensor(y_train_lstm, dtype=torch.float32)
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        # Now slicing is done on pre-converted tensors
+        X = self.rates[i: i + self.sequence_length, :]
+        y = self.behavior[i + self.sequence_length, :]
+        return X, y
 
 
 def process_session(params, device):
+    """"
+    Decode the neural data using LSTM model.
 
-
+    Parameters
+    ----------
+    params : list
+        List of parameters for the decoding.
+    device : torch.device
+        The device to use for training the model.
+    """
     # Unpack the parameters
-    mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr = params
+    mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor = params
 
     # Load the spike rates
     print('Loading Data...\n')
@@ -200,7 +180,6 @@ def process_session(params, device):
         data['sns'] = mean_freqs
         data['sns'] = data['sns'].interpolate(method='linear')
         data.dropna(subset=['x', 'y', 'v_x', 'v_y', 'sns'], inplace=True)
-
         spike_rates = data.iloc[:, :-8].values
 
 
@@ -208,41 +187,34 @@ def process_session(params, device):
         true_rmse = []
         null_rmse = []
 
+
+        # Getting the behavior data
+        if target == 'position':
+            behavior = data[['x', 'y']].values
+            behavior_name = ['x', 'y']
+            behavior_dim = 2
+        elif target == 'sniffing':
+            behavior = data['sns'].values
+            behavior_name = ['sniffing']
+            behavior_dim = 1
+            behavior = behavior.reshape(-1, 1)
+        elif target == 'velocity':
+            behavior = data[['v_x', 'v_y']].values
+            behavior_name = ['v_x', 'v_y']
+            behavior_dim = 2
+        elif target == 'neural':
+            behavior = other_rates
+            behavior_name = [f'neuron_{i}' for i in range(other_rates.shape[1])]
+            behavior_dim = other_rates.shape[1]
+
+
         # Loop through the shifts
         for shift in range(n_shifts + 1):
             if shift == 0:
-                if target == 'position':
-                    behavior = data[['x', 'y']].values
-                    behavior_name = ['x', 'y']
-                    behavior_dim = 2
-                elif target == 'sniffing':
-                    behavior = data['sns'].values
-                    behavior_name = ['sniffing']
-                    behavior_dim = 1
-                    behavior = behavior.reshape(-1, 1)
-                elif target == 'velocity':
-                    behavior = data[['v_x', 'v_y']].values
-                    behavior_name = ['v_x', 'v_y']
-                    behavior_dim = 2
-                elif target == 'neural':
-                    behavior = other_rates
-                    behavior_name = [f'neuron_{i}' for i in range(other_rates.shape[1])]
-                    behavior_dim = other_rates.shape[1]
                 current_save_path = os.path.join(region_save_path, 'true')
                 os.makedirs(current_save_path, exist_ok=True)
             else:
                 roll_value = np.random.randint(100, len(data) - 100)
-                if target == 'position':
-                    behavior = data[['x', 'y']].values.copy()
-                elif target == 'sniffing':
-                    behavior = data['sns'].values.copy()
-                    behavior = behavior.reshape(-1, 1)
-                elif target == 'velocity':
-                    behavior = data[['v_x', 'v_y']].values.copy()
-                elif target == 'neural':
-                    behavior = other_rates.copy()
-
-                
                 behavior = np.roll(behavior, roll_value, axis=0)
                 current_save_path = os.path.join(region_save_path, 'null')
                 os.makedirs(current_save_path, exist_ok=True)
@@ -262,11 +234,13 @@ def process_session(params, device):
                 lstm_model = LSTMDecoder(input_dim=rates_train.shape[1], hidden_dim=hidden_dim, output_dim=behavior.shape[1], num_layers=num_layers, dropout = dropout).to(device)
 
                 # Prepare the training data for LSTM
-                X_train_lstm, y_train_lstm = prepare_sequences(rates_train, behavior_train, sequence_length)
+                blocks = [(train_switch_ind[i], train_switch_ind[i + 1]) for i in range(len(train_switch_ind) - 1)]
+                train_dataset = SequenceDataset(rates_train, behavior_train, blocks, sequence_length)
+                train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, num_workers=8, pin_memory=True)
 
                 
                 # Training the LSTM model
-                trained_lstm_model, lstm_history = train_LSTM(lstm_model, X_train_lstm, y_train_lstm, lr=0.001, epochs=num_epochs, patience=100, min_delta=.001, factor=0.1)
+                trained_lstm_model, lstm_history = train_LSTM(lstm_model, train_loader, device, lr=lr, epochs=num_epochs, patience=patience, min_delta=min_delta, factor=factor)
                 optimal_loss = min(lstm_history)
                 model_used_index = lstm_history.index(optimal_loss)
 
@@ -278,10 +252,6 @@ def process_session(params, device):
                     plt.xlabel('Epoch')
                     plt.ylabel('Loss (Mean Squared Error)')
                     plt.yscale('log')
-                    if target == 'sniffing':
-                        plt.ylim(1e-3, 10)
-                    else:
-                        plt.ylim(1, 1e4)
                     plt.scatter(model_used_index, optimal_loss, color='red', s=100)
                     sns.despine()
                     plt.tight_layout()
@@ -289,39 +259,28 @@ def process_session(params, device):
                     plt.close()
 
                 # Prepare the test data for LSTM
-                X_test_lstm = []
-                y_test_lstm = []
-                for block in range(len(test_switch_ind) - 1):
-                    start = test_switch_ind[block]
-                    end = test_switch_ind[block + 1]
+                test_blocks = [(test_switch_ind[i], test_switch_ind[i + 1]) for i in range(len(test_switch_ind) - 1)]
+                test_dataset = SequenceDataset(rates_test, behavior_test, test_blocks, sequence_length)
+                test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False, num_workers=8)
 
-                    # Create sequences for the current block
-                    rates_block = rates_test[start:end, :]
-                    behavior_block = behavior_test[start:end, :]
-                    X_block, _ = create_sequences(rates_block, sequence_length)
-                    y_block = behavior_block[sequence_length:]
-
-                    # Append to the test data
-                    X_test_lstm.append(X_block)
-                    y_test_lstm.append(y_block)
-
-                # Concatenate all blocks
-                X_test_lstm = np.concatenate(X_test_lstm, axis=0)
-                y_test_lstm = np.concatenate(y_test_lstm, axis=0)
-
-                # Convert the test data to tensors
-                X_test_lstm = torch.tensor(X_test_lstm, dtype=torch.float32).to(device)
-                y_test_lstm = torch.tensor(y_test_lstm, dtype=torch.float32).to(device)
-
-
+            
                 # Predict on the test set
-                lstm_model.eval()
+                trained_lstm_model.eval()
+                predictions = []
+                targets = []
                 with torch.no_grad():
-                    predictions = trained_lstm_model(X_test_lstm)
-                
+                    for X_batch, y_batch in test_loader:
+                        X_batch = X_batch.to(device)
+                        preds = trained_lstm_model(X_batch)
+                        predictions.append(preds.cpu().numpy())
+                        targets.append(y_batch.cpu().numpy())
+                predictions = np.concatenate(predictions, axis=0)
+                targets = np.concatenate(targets, axis=0)
+
+
                 # Converting the predictions and true values back to original scale
                 predictions = predictions.cpu().numpy() * behavior_std + behavior_mean
-                y_test_lstm = y_test_lstm.cpu().numpy() * behavior_std + behavior_mean
+                targets = targets.cpu().numpy() * behavior_std + behavior_mean
 
                 # plotting the predicted and true values
                 if plot_predictions:
@@ -330,7 +289,7 @@ def process_session(params, device):
                     if behavior_dim == 1:
                         ax = [ax]
                     for i in range(behavior_dim):
-                        ax[i].plot(y_test_lstm[:, i], label='True', color = 'crimson')
+                        ax[i].plot(targets[:, i], label='True', color = 'crimson')
                         ax[i].plot(predictions[:, i], label='Predicted')
                         ax[i].set_ylabel(behavior_name[i])
                         for ind in adjusted_test_switch_ind:
@@ -340,11 +299,8 @@ def process_session(params, device):
                     plt.savefig(os.path.join(current_save_path, f'lstm_predictions_k_{k}_shift_{shift}.png'), dpi=300)
                     plt.close()
 
-                # Calculate Euclidean distance error at each time point
-                euclidean_distances = np.sqrt(np.sum((predictions - y_test_lstm)**2, axis=1))
-
-                # Calculate RMSE of these distances
-                rmse = np.sqrt(np.mean(euclidean_distances**2))
+                # Calculate the RMSE
+                rmse = np.sqrt(np.sum((predictions - targets)**2))
 
                 # Store the MSE
                 if shift == 0:
@@ -394,7 +350,7 @@ def main():
 
     # defining directories
     spike_dir = r"D:\clickbait-ephys\kilosorted"
-    save_dir_main = r"E:\clickbait-ephys\figures\LSTM (3-18-25)"
+    save_dir_main = r"E:\clickbait-ephys\figures\LSTM (3-19-25)"
     events_dir = r"D:\clickbait-ephys\behavior_data"
     SLEAP_dir = r"D:\clickbait-ephys\sleap_predictions"
     sniff_dir = r"D:\clickbait-ephys\sniff events"
@@ -428,12 +384,15 @@ def main():
     dropout = 0.1 # Define the dropout for LSTM
     num_epochs = 2000 # Define the number of epochs for LSTM training
     lr = 0.01
+    patience = 100
+    min_delta = 0.01
+    factor = 0.5
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
 
-    for target in ['sniffing']:
+    for target in ['position']:
 
         # creating a directory to save the figures
         save_dir = os.path.join(save_dir_main, f"window_size_{window_size}_target_{target}")
@@ -455,9 +414,14 @@ def main():
             f.write(f"num_layers: {num_layers}\n")
             f.write(f"dropout: {dropout}\n")
             f.write(f"num_epochs: {num_epochs}\n")
+            f.write(f"lr: {lr}\n")
+            f.write(f"patience: {patience}\n")
+            f.write(f"min_delta: {min_delta}\n")
+            f.write(f"factor: {factor}\n")
             f.write(f"save_dir: {save_dir}\n")
 
 
+            # Looping through the data
             for mouse in mice:
                 for session in sessions:
                     # Building the task list
@@ -468,10 +432,10 @@ def main():
                     if not os.path.exists(kilosort_dir) or not os.path.exists(behavior_dir) or not os.path.exists(tracking_dir) or not os.path.exists(sniff_dir):
                         print(f"Skipping {mouse}/{session} due to missing data.")
                         continue
-                    params = [mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_params_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr]
+                    params = [mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_params_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor]
+
 
                     # decode the data
-
                     process_session(params, device)
 
 
