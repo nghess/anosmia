@@ -4,14 +4,15 @@ from decoding_library import *
 from core import compute_spike_rates_sliding_window_by_region_smooth, load_behavior, align_brain_and_behavior, compute_sniff_freqs_bins
 from plotting import plot_position_trajectories
 import os
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib
+import multiprocessing as mp
 import concurrent.futures
 from scipy.io import loadmat
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import time
 
 
@@ -519,13 +520,14 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
     rates_train, rates_test, train_switch_ind, test_switch_ind = cv_split(spike_rates, k, k_CV=k_CV, n_blocks=n_blocks)
     behavior_train, behavior_test, _, _ = cv_split(behavior, k, k_CV=k_CV, n_blocks=n_blocks)
 
+
     # Create the model
     lstm_model = LSTMDecoder(input_dim=rates_train.shape[1], hidden_dim=hidden_dim, output_dim=behavior.shape[1], num_layers=num_layers, dropout = dropout).to(device)
 
     # Prepare the training data for LSTM
     blocks = [(train_switch_ind[i], train_switch_ind[i + 1]) for i in range(len(train_switch_ind) - 1)]
     train_dataset = SequenceDataset(rates_train, behavior_train, blocks, sequence_length)
-    train_loader = DataLoader(train_dataset, batch_size=16_384, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=8, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=min(16_384, len(train_dataset)), shuffle=False, num_workers=1, pin_memory=True, prefetch_factor=1, persistent_workers=True)
 
     # Training the LSTM model
     trained_lstm_model, lstm_history = train_LSTM(lstm_model, train_loader, device, lr=lr, epochs=num_epochs, patience=patience, min_delta=min_delta, factor=factor)
@@ -540,7 +542,7 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
     # Prepare the test data for LSTM
     test_blocks = [(test_switch_ind[i], test_switch_ind[i + 1]) for i in range(len(test_switch_ind) - 1)]
     test_dataset = SequenceDataset(rates_test, behavior_test, test_blocks, sequence_length)
-    test_loader = DataLoader(test_dataset, batch_size=16_384, persistent_workers=True, num_workers=1, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=min(16_384, len(test_dataset)), persistent_workers=True, num_workers=1, pin_memory=True)
 
     # Predict on the test set
     trained_lstm_model.eval()
@@ -596,7 +598,7 @@ def parallel_process_session(spike_rates, behavior, n_folds, shift, current_save
         List of RMSE values, one per fold.
     """
     rmse_list = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=25) as executor:
         futures = []
         for k in range(n_folds):
             # Submit each fold as a separate process.
@@ -631,6 +633,7 @@ def process_session(params):
         print('Loading Data...\n')
         rates_OB, rates_HC, time_bins, units_OB, units_HC = compute_spike_rates_sliding_window_by_region_smooth(kilosort_dir, fs, window_size, step_size, use_units=use_units, sigma=sigma_smooth, zscore=True)
 
+
         # load the tracking data
         files = os.listdir(tracking_dir)
         tracking_file = [f for f in files if f.endswith('.analysis.h5')][0]
@@ -639,7 +642,11 @@ def process_session(params):
 
         # Loading the sniffing
         sniff_params_file = os.path.join(sniff_dir, 'sniff_params.mat')
-        mean_freqs, _ = compute_sniff_freqs_bins(sniff_params_file, time_bins, window_size, sfs = 1000)
+        # ensure the file exists
+        if os.path.exists(sniff_params_file):
+            mean_freqs, _ = compute_sniff_freqs_bins(sniff_params_file, time_bins, window_size, sfs = 1000)
+        else:
+            mean_freqs = np.zeros(len(time_bins))
 
 
 
@@ -675,7 +682,7 @@ def process_session(params):
                 other_units = units_OB
 
             # if fewer than 2 neurons in the region, skip the region
-            if rates.shape[1] < 2:
+            if rates.shape[0] < 2:
                 print(f"Skipping {mouse}/{session}/{region} due to insufficient neurons.")
                 continue
         
@@ -707,6 +714,10 @@ def process_session(params):
                 behavior_name = ['v_x', 'v_y']
                 behavior_dim = 2
             elif target == 'neural':
+                # Ensure at least 1 neuron is present
+                if other_rates.shape[0] < 1:
+                    print(f"Skipping {mouse}/{session}/{region} due to insufficient neurons.")
+                    continue
                 data_other = align_brain_and_behavior(events, other_rates, other_units, time_bins, window_size, speed_threshold = speed_threshold)
                 data_other['sns'] = mean_freqs
                 data_other['sns'] = data['sns'].interpolate(method='linear')
@@ -914,7 +925,7 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
 
 
     # defining directories
-    spike_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)"
+    spike_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/kilosorted"
     save_dir_main = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/figures"
     events_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/behavior_data"
     SLEAP_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/sleap_predictions"
@@ -925,7 +936,7 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
     print(f"Using device: {device}")
 
 
-    for target in ['position', 'sniff', 'neural']:
+    for target in ['position', 'sniffing', 'neural']:
 
         # creating a directory to save the figures
         save_dir = os.path.join(save_dir_main, f"window_size_{window_size}_target_{target}")
@@ -982,20 +993,24 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
 
 if __name__ == "__main__":
 
+    mp.set_start_method('spawn', force=True)
+
+
+
     # Set the parameters
     window_size = 0.1
     step_size = 0.1
     sigma_smooth = 2.5
     use_units = 'good/mua'
     speed_threshold = 100
-    n_shifts = 1
-    k_CV = 8
-    n_blocks = 10
+    n_shifts = 4
+    k_CV = 25
+    n_blocks = 3
     plot_predictions = True
     sequence_length = 10
     hidden_dim = 64
     num_layers = 2
-    dropout = 0.5
+    dropout = 0.1
     num_epochs = 500
     lr = 0.01
     patience = 20

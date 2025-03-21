@@ -286,6 +286,7 @@ def compute_spike_rates_sliding_window_by_region_smooth(kilosort_dir: str, sampl
         unit_indices = np.where(cluster_groups == 'noise')[0]
         unit_best_channels = {unit: unit_best_channels[unit] for unit in unit_indices}
 
+
     # Get total duration of the recording
     recording_duration = np.max(spike_times)
 
