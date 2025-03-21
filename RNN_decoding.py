@@ -7,12 +7,12 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib
-import multiprocessing as mp
 import concurrent.futures
 from scipy.io import loadmat
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+import torch.multiprocessing as mp
 import time
 
 
@@ -447,6 +447,8 @@ def preprocess_rnp(path, bin_size=20, crop_hf=True, flip_data=None, make_plots=F
 
 
 
+
+
 def plot_training(lstm_history, save_path, shift, k):
 
     optimal_loss = min(lstm_history)
@@ -501,6 +503,38 @@ def plot_rmse(true_rmse, null_rmse, p_val, region_save_path):
     plt.savefig(os.path.join(region_save_path, 'rmse_distribution.png'), dpi=300)
     plt.close()
 
+
+
+
+
+
+
+
+def process_fold_worker(rank, args):
+    """
+    Worker function to process a single fold.
+    
+    Parameters:
+        rank: The fold number (process index).
+        args: A tuple containing:
+            - spike_rates: Full spike rates array.
+            - behavior: Normalized behavior array.
+            - n_folds: Total number of folds.
+            - shift: The current shift value.
+            - current_save_path: Where to save outputs.
+            - behavior_name: Name of the behavior.
+            - behavior_dim: Behavior dimensions.
+            - model_params: Model and training parameters.
+            - rmse_list: A shared list to store the RMSE for each fold.
+    """
+    (spike_rates, behavior, n_folds, shift, current_save_path,
+     behavior_name, behavior_dim, model_params, rmse_list) = args
+
+    # Here, 'rank' serves as the fold index.
+    rmse = process_fold(spike_rates, behavior, rank, shift,
+                        current_save_path, behavior_name, behavior_dim, model_params)
+    rmse_list[rank] = rmse  # Store the result in the shared list.
+    print(f"Process {rank} finished with RMSE: {rmse}")
 
 
 def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_name, behavior_dim, params):
@@ -579,8 +613,43 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
 
 
 
-def parallel_process_session(spike_rates, behavior, n_folds, shift, current_save_path, 
+def parallel_process_session_GPU(spike_rates, behavior, n_folds, shift, current_save_path, 
                              behavior_name, behavior_dim, model_params):
+    """
+    Run process_fold in parallel for all folds using torch.multiprocessing.
+    
+    Parameters:
+        spike_rates: Full spike rates array.
+        behavior: Normalized behavior array.
+        n_folds: Number of CV folds.
+        shift: The current shift value.
+        current_save_path: Where to save outputs for this region/shift.
+        behavior_name, behavior_dim: Behavior scaling and labeling.
+        model_params: List of model and training parameters (e.g., k_CV, n_blocks, plot_predictions, etc.).
+    
+    Returns:
+        List of RMSE values, one per fold.
+    """
+    
+    # Create a manager to handle a shared list.
+    manager = mp.Manager()
+    rmse_list = manager.list([None] * n_folds)
+    
+    # Pack the common arguments to pass to each worker.
+    args = (spike_rates, behavior, n_folds, shift, current_save_path, 
+            behavior_name, behavior_dim, model_params, rmse_list)
+    
+    # Launch processes, one per fold.
+    # mp.spawn will automatically pass the rank (from 0 to n_folds-1) as the first argument.
+    mp.spawn(process_fold_worker, args=(args,), nprocs=n_folds, join=True)
+    
+    # Convert the shared list to a regular list before returning.
+    return list(rmse_list)
+
+
+
+def parallel_process_session(spike_rates, behavior, n_folds, shift, current_save_path, 
+                             behavior_name, behavior_dim, model_params, parallel = True):
     """
     Run process_fold in parallel for all folds.
     
@@ -598,16 +667,22 @@ def parallel_process_session(spike_rates, behavior, n_folds, shift, current_save
         List of RMSE values, one per fold.
     """
     rmse_list = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=25) as executor:
-        futures = []
+    if parallel:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+            futures = []
+            for k in range(n_folds):
+                # Submit each fold as a separate process.
+                futures.append(executor.submit(process_fold,
+                                                spike_rates, behavior, k, shift, current_save_path,
+                                                    behavior_name, behavior_dim, model_params))
+            for future in concurrent.futures.as_completed(futures):
+                rmse_list.append(future.result())
+        return rmse_list
+    else:
         for k in range(n_folds):
-            # Submit each fold as a separate process.
-            futures.append(executor.submit(process_fold,
-                                             spike_rates, behavior, k, shift, current_save_path,
-                                                behavior_name, behavior_dim, model_params))
-        for future in concurrent.futures.as_completed(futures):
-            rmse_list.append(future.result())
-    return rmse_list
+            rmse = process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_name, behavior_dim, model_params)
+            rmse_list.append(rmse)
+        return rmse_list
 
 
 
@@ -746,9 +821,9 @@ def process_session(params):
 
             # Loop through the cross-validation folds to get decoding errors
             if shift == 0:
-                true_rmse = parallel_process_session(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, behavior_dim, model_params)
+                true_rmse = parallel_process_session(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, behavior_dim, model_params, parallel = False)
             else:
-                null_rmse.append(parallel_process_session(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, behavior_dim, model_params))
+                null_rmse.append(parallel_process_session(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, behavior_dim, model_params, parallel = False))
         
         true_rmse = np.array(true_rmse).flatten()
         null_rmse = np.array(null_rmse).flatten()
@@ -982,10 +1057,10 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
                     params = [mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_params_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor]
 
                     # Run the decoding
-                    try:
-                        process_session(params)
-                    except Exception as e:
-                        print(f"Error processing {mouse}/{session}: {e}")
+                    #try:
+                    process_session(params)
+                    #except Exception as e:
+                        #print(f"Error processing {mouse}/{session}: {e}")
 
 
 
