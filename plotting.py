@@ -174,6 +174,65 @@ def plot_spike_rates(time_bins: np.ndarray, rates_OB: np.ndarray, rates_HC: np.n
 
 
 
+
+def plot_training(lstm_history, save_path, shift, k):
+
+    optimal_loss = min(lstm_history)
+    model_used_index = lstm_history.index(optimal_loss)
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(x=np.arange(len(lstm_history)), y=lstm_history, linewidth=4, color='blue')
+    plt.title(f'LSTM Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.yscale('log')
+    plt.scatter(model_used_index, optimal_loss, color='red', s=100)
+    sns.despine()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f'lstm_loss_{k}_shift_{shift}.png'), dpi=300)
+    plt.close()
+
+
+def plot_preds(targets, predictions, test_switch_ind, behavior_name, behavior_dim, sequence_length, save_path, k, shift):
+    adjusted_test_switch_ind = [ind - sequence_length * k for k, ind in enumerate(test_switch_ind)]
+    _, ax = plt.subplots(behavior_dim, 1, figsize=(20, 10))
+    if behavior_dim == 1:
+        ax = [ax]
+    for i in range(behavior_dim):
+        ax[i].plot(targets[:, i], label='True', color = 'crimson')
+        ax[i].plot(predictions[:, i], label='Predicted')
+        ax[i].set_ylabel(behavior_name[i])
+        for ind in adjusted_test_switch_ind:
+            ax[i].axvline(ind, color='grey', linestyle = '--', alpha=0.5)
+
+    if behavior_dim > 4:
+        # remove the y-axis ticks 
+        for a in ax:
+            a.set_yticks([])
+    plt.xlabel('Time')
+    ax[0].legend(loc = 'upper right')
+
+    sns.despine()
+    plt.savefig(os.path.join(save_path, f'lstm_predictions_k_{k}_shift_{shift}.png'), dpi=300)
+    plt.close()
+
+
+def plot_rmse(true_rmse, null_rmse, p_val, region_save_path):
+    plt.figure(figsize=(20, 10))
+    plt.hist(true_rmse, bins=10, alpha=0.5, label='True error', color='dodgerblue', density=True)
+    plt.hist(null_rmse, bins=10, alpha=0.5, label='Null error', color='crimson', density=True)
+    plt.xlabel('RMSE')
+    plt.ylabel('Probability Density')
+    plt.title(f'RMSE Distribution\np_val: {p_val:.2e}')
+    plt.legend()
+    sns.despine()
+    plt.savefig(os.path.join(region_save_path, 'rmse_distribution.png'), dpi=300)
+    plt.close()
+
+
+
+
+
 def plot_raw_signals(lfp, theta, mua, sniff,channel, seg, mouse, session, save_path, time_axis, length, fs = 30000, colors = {'LFP': '#1f77b4', 'MUA': '#ff7f0e', 'Sniff': '#2ca02c'}):
 
     fig, ax = plt.subplots(3, 1, figsize=(20, 10), sharex=True)

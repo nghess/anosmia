@@ -184,6 +184,327 @@ def load_behavior(behavior_file: str, tracking_file: str = None) -> pd.DataFrame
 
 
 
+def nan_helper(y):
+    """Helper to handle indices and logical indices of NaNs.
+
+    Input:
+        - y, 1d numpy array with possible NaNs
+    Output:
+        - nans, logical indices of NaNs
+        - index, a function, with signature indices= index(logical_indices),
+          to convert logical indices of NaNs to 'equivalent' indices
+    Example:
+        >>> # linear interpolation of NaNs
+        >>> nans, x= nan_helper(y)
+        >>> y[nans]= np.interp(x(nans), x(~nans), y[~nans])
+    """
+    return np.isnan(y), lambda z: z.nonzero()[0]
+
+
+def preprocess_rnp(path, bin_size=20, crop_hf=True, flip_data=None, make_plots=False, save_path= None):
+    '''
+    Get the data from a given file path and preprocess by binning spikes,
+    tracking, and sniffing data.
+    
+    Some preprocessing is also done to exclude 
+    units with a large number of refractory violations or negative spike 
+    amplitudes (see the readme file).
+    
+    Parameters
+    --
+    path : Path to the directory containing the data.
+    
+    bin_size : Number of 10ms time steps to include in each bin.
+    
+    crop_hf : If True, crop out the initial and final periods of the 
+        session during which the mouse is head fixed.
+        
+    make_plots : If True, make some plots of the data, saving them as a
+        PDF file in the directory containing the data.
+        
+    flip_data : If flip_data='pre' and there is a floor flip, return 
+        only data from before the flip. If flip_data='post' and there 
+        is a floor flip, return only data from after the flip.
+        
+    Returns
+    --
+    If there is no tracking data for the session, returns None. If there
+    is tracking data, the following are returned:
+    
+    spks : The binned spiking data. 2D array of shape n_bins-by-n_units.
+    
+    pos_ss : The average x-y position of the mouse's head in each time bin.
+        2D array of shape n_bins-by-2.
+        
+    speed_ss : The average speed (in arbitrary units) of the mouse in each
+        time bin. 1D array of length n_bins.
+        
+    sniff_freq_ss : The average instantaneous sniff frequency (in Hz) in
+        each time bin. 1D array of length n_bins. If sniff data is not
+        available for the session, returns None.
+    '''
+
+
+    if 'track.mat' in os.listdir(path):
+        track = loadmat(path + '/track.mat')
+        head = track['track'][:,3:5]
+        frame_times_ds = track['track'][:,0]  # frame times in ms (one frame per ~10ms)
+    elif 'mtrack.mat' in os.listdir(path):
+        track = loadmat(path + '/mtrack.mat')
+        head = track['mtrack'][:,2:4]
+        frame_times_ds = track['mtrack'][:,0] # frame times in ms (one frame per ~10ms)
+    else:
+        print('No tracking data for this session.')
+        return None, None, None, None
+
+
+    cluster_ids = loadmat(path + '/cluster_ids.mat')
+    spike_times = loadmat(path + '/spike_times.mat')
+
+
+    frame_times = frame_times_ds * 30  # convert to 30kHz clock
+
+    spike_key = spike_times.keys()
+    spike_key = list(spike_key)[-1]
+    spikes = spike_times[spike_key][:,0]  # spike times according to ticks of a 30kHz clock
+    clusters = cluster_ids['clusters'][:,0]
+  
+    
+
+    pos = head
+    speed = (pos[1:,:] - pos[:-1,:])/np.outer((frame_times_ds[1:] - frame_times_ds[:-1]), np.ones(2))
+    speed = np.vstack((speed, np.zeros(2).T))
+    
+    # Occasionally the shapes of the following two things differ slightly, so chop one:
+    if len(frame_times) != len(frame_times_ds):
+        print('frame_times and frame_times_ds have different sizes: ', 
+              len(frame_times), len(frame_times_ds))
+        min_len = np.min([len(frame_times), len(frame_times_ds)])
+        frame_times = frame_times[:min_len]
+        frame_times_ds = frame_times_ds[:min_len]
+        pos = pos[:min_len]
+        speed = speed[:min_len]
+    n_frames = len(frame_times_ds)
+
+    # Interpolate nans:
+    for i in range(2):
+        nans, x = nan_helper(pos[:,i])
+        if np.sum(nans) > 0:
+            pos[nans,i]= np.interp(x(nans), x(~nans), pos[~nans,i])
+        nans, x = nan_helper(speed[:,i])
+        if np.sum(nans) > 0:
+            speed[nans,i]= np.interp(x(nans), x(~nans), speed[~nans,i])
+
+    # Preprocess the sniff data (if it exists):
+    if 'sniff_params.mat' in os.listdir(path): 
+        sniff = loadmat(path + '/sniff_params.mat')['sniff_params']  # sniff times in ms
+        sniffs = sniff[:,0]
+        #bad sniffs are sniffs where the third column is zero
+        bad_sniffs = np.where(sniff[:,2] == 0)[0]
+
+        sniffs = np.delete(sniffs, bad_sniffs)
+
+        dsniffs = sniffs[1:] - sniffs[:-1]
+        sniffs = sniffs[1:]
+        sniff_freq = 1000/dsniffs  # instantaneous sniff frequency (in Hz)
+        sniff_freq_binned = np.zeros(n_frames)
+        for i,t in enumerate(frame_times_ds):
+            sniff_freq_binned[i] = np.mean(sniff_freq[(sniffs>t)*(sniffs<t+10*bin_size)])
+
+        # Interpolate nans (in case some bins didn't have sniffs):
+        nans, x = nan_helper(sniff_freq_binned)
+        if np.sum(nans) > 0:
+            sniff_freq_binned[nans]= np.interp(x(nans), x(~nans), sniff_freq_binned[~nans])
+    else:
+        print('No sniff data for this session.')
+        sniff_freq_binned = None
+
+
+
+    if 'events.mat' in os.listdir(path): 
+        events = loadmat(path + '/events.mat')['events']
+
+        # Event frames and times:
+        frame_fm1, t_fm1 = events[0,0], events[0,2]  # frame/time at which initial HF condition ends
+        frame_fm2, t_fm2 = events[0,1], events[0,3]  # frame/time at which FM condition begins
+        frame_hf1, t_hf1 = events[1,0], events[1,2]  # frame/time at which FM condition ends
+        frame_hf2, t_hf2 = events[1,1], events[1,3]  # frame/time at which final HF condition begins
+        frame_flip1, t_flip1 = events[2,0], events[2,2]  # frame/time at which floor flip begins
+        frame_flip2, t_flip2 = events[2,1], events[2,3]  # frame/time at which floor flip ends
+
+        # Create a mask to handle head-fixed to freely moving transitions and floor flips:
+        mask = np.array([True for ii in range(n_frames)])
+        color_mask = np.array([0 for ii in range(n_frames)]) # for plotting purposes. 0 for free movement, 1 for headfixed, and 2 for transitions
+
+        if crop_hf:  # crop out the initial and final HF periods
+            if frame_fm1!=0:
+                mask[:frame_fm2] = False
+                color_mask[:frame_fm2] = 1
+                color_mask[frame_fm1:frame_fm2] = 2
+            elif frame_fm2!=0:
+                mask[:frame_fm2] = False
+                color_mask[:frame_fm2] = 1
+
+            if frame_hf1!=0:
+                mask[frame_hf1:] = False
+                color_mask[frame_hf1:] = 1
+                color_mask[frame_hf1:frame_hf2] = 2
+
+        else:  # crop out just the transitions between FM and HF. You probably shouldent be using this....
+            if frame_fm1!=0:
+                mask[frame_fm1:frame_fm2] = False
+                color_mask[frame_fm1:frame_fm2] = 2
+            if frame_hf1!=0:
+                mask[frame_hf1:frame_hf2] = False
+                color_mask[frame_hf1:frame_hf2] = 2
+
+        if frame_flip1!=0:  # keep data only from before or after the flip
+            mask[frame_flip1:frame_flip2] = False
+            color_mask[frame_flip1:frame_flip2] = 2
+
+            if flip_data=='pre':  
+                mask[frame_flip1:] = False
+            elif flip_data=='post':
+                mask[:frame_flip2] = False
+                
+
+
+            # ensuring the length of the mask is at least 20 minutes
+            if np.sum(mask) < 12000:
+                print('Not enough data to analyze.')
+                return None, None, None, None
+            
+        # plot the sniff frequencies color coded by the 3 conditions
+        if sniff_freq_binned is not None and make_plots:
+            plt.figure(figsize=(20,8))
+            plt.scatter(frame_times_ds[mask == True] / 1000, sniff_freq_binned[mask == True], s=5, marker='.')
+            plt.scatter(frame_times_ds[mask == False] / 1000, sniff_freq_binned[mask == False], s=5, marker='.')
+
+            plt.title('Sniff frequency color coded by condition')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Sniff frequency (Hz)') 
+            plt.legend(['Used data', 'Excluded data'])
+            plt.tight_layout()
+            plt.savefig(save_path + '/sniff_frequency_color_coded.png')
+            plt.close()
+
+        # for sessions without sniffing data, plot just a horizontal bar colored based on the mask conditions
+        if make_plots:
+            plt.figure(figsize=(20,8))
+            plt.scatter(frame_times_ds[mask == True] / 1000, np.zeros(np.sum(mask)), s=5, marker='.')
+            plt.scatter(frame_times_ds[mask == False] / 1000, np.zeros(np.sum(~mask)), s=5, marker='.')
+
+            plt.title('No sniff data color coded by condition')
+            plt.xlabel('Time (s)')
+            plt.ylabel('Sniff frequency (Hz)') 
+            plt.legend(['Used data', 'Excluded data'])
+            plt.tight_layout()
+            plt.savefig(save_path + '/no_sniff_data_color_coded.png')
+            plt.close()
+
+
+
+        # Keep the data selected by the mask; 
+        frame_times_ds = frame_times_ds[mask]
+        frame_times = frame_times[mask]
+        pos = pos[mask,:]
+        speed = speed[mask,:]
+
+        # Chop off the last few points if not divisible by bin_size:
+        frame_times_ds = frame_times_ds[:bin_size*(len(frame_times_ds)//bin_size)]
+        frame_times = frame_times[:bin_size*(len(frame_times)//bin_size)]
+        pos = pos[:bin_size*(len(pos)//bin_size)]
+        speed = speed[:bin_size*(len(speed)//bin_size)]
+
+        # Do the same thing for the sniff data if it exists:
+        if 'sniff_params' in os.listdir(path): 
+            sniff_freq_binned = sniff_freq_binned[mask]
+            sniff_freq_binned = sniff_freq_binned[:bin_size*(len(sniff_freq_binned)//bin_size)]
+        
+            # Average the sniff-frequency data within each bin:
+            sniff_freq_ss = np.zeros(len(sniff_freq_binned)//bin_size)
+            for i in range(len(sniff_freq_binned)//bin_size):
+                sniff_freq_ss[i] = np.mean(sniff_freq_binned[i*bin_size:(i+1)*bin_size], axis=0)
+        else:
+            sniff_freq_ss = None
+
+    # Average the behavioral data within each bin:
+    pos_ss = np.zeros((len(pos)//bin_size, 2))
+    speed_ss = np.zeros((len(speed)//bin_size, 2))
+    for i in range(len(pos)//bin_size):
+        pos_ss[i,:] = np.mean(pos[i*bin_size:(i+1)*bin_size,:], axis=0)
+        speed_ss[i,:] = np.mean(speed[i*bin_size:(i+1)*bin_size,:], axis=0)
+
+    # Clip and normalize the position data:
+    pos_ss[:,0] = np.clip(pos_ss[:,0], np.percentile(pos_ss[:,0], 0.5), np.percentile(pos_ss[:,0], 99.5))
+    pos_ss[:,1] = np.clip(pos_ss[:,1], np.percentile(pos_ss[:,1], 0.5), np.percentile(pos_ss[:,1], 99.5))
+    pos_ss[:,0] -= np.min(pos_ss[:,0])
+    pos_ss[:,1] -= np.min(pos_ss[:,1])
+    #pos_ss[:,0] = pos_ss[:,0]*x_max/np.max(pos_ss[:,0])
+    #pos_ss[:,1] = pos_ss[:,1]*y_max/np.max(pos_ss[:,1])
+        
+    # Bin the spiking data:
+    spks = np.zeros((0, len(frame_times)//bin_size))
+    for cluster in np.unique(clusters):
+        # only keep clusters with firing rate > 0.5 Hz:
+        c1 = np.sum(spikes[clusters==cluster])/(1e-3*(frame_times[-1] - frame_times[0])) > 0.5
+
+        # < 5% of spikes may violate the 1.5ms refractory period:
+        isi = np.diff(spikes[clusters==cluster])
+        c2 = np.sum(isi < 1.5)/(1+len(isi)) < 0.05  
+
+
+
+        if c1 and c2:
+            bin_edges = np.append(frame_times[::bin_size], frame_times[-1])
+            spike_counts, _ = np.histogram(spikes[clusters==cluster], bin_edges, density=False)
+            # Normalize so that spike counts are in Hz:
+            spike_counts = 3e4*spike_counts/(bin_edges[1:] - bin_edges[:-1])
+            spks = np.vstack((spks, spike_counts[:len(spks.T)])) 
+    spks = spks.T
+
+    if make_plots:
+        times = np.arange(len(pos_ss))*0.01*bin_size
+        plt.figure(figsize=(9,9))
+        plt.subplot(421)
+        plt.plot(times, pos_ss[:,0])
+        plt.plot(times, pos_ss[:,1])
+        plt.xlim(0, times[-1])
+        plt.ylabel('x,y')
+        plt.xlabel('Time (s)')
+        plt.subplot(422)
+        plt.plot(pos_ss[:,0], pos_ss[:,1], lw=0.25)
+        plt.subplot(423)
+        plt.plot(times, np.linalg.norm(speed_ss, axis=1))
+        plt.xlim(0, times[-1])
+        plt.xlabel('Time (s)')
+        plt.ylabel('Speed (a.u.)')
+        plt.subplot(424)
+        plt.hist(100/bin_size*np.mean(spks, axis=0), bins=30)
+        plt.xlabel('Firing rate (Hz)')
+        plt.ylabel('Units')
+        if sniff_freq_ss is not None:
+            plt.subplot(425)
+            plt.plot(times, sniff_freq_ss)
+            plt.xlim(0, times[-1])
+            plt.xlabel('Time (s)')
+            plt.ylabel('Sniff frequency (Hz)')
+        plt.subplot(427)
+        plt.imshow(np.log(1e-3+(spks/np.max(spks, axis=0)).T), aspect='auto', interpolation='none')
+        plt.xticks([0, len(spks)], [0, int(times[-1])])
+        plt.yticks([0, len(spks.T)-1], [1, len(spks.T)])
+        plt.xlabel('Time (s)')
+        plt.ylabel('Unit')
+        plt.tight_layout()
+        if flip_data is not None:
+            plt.savefig(save_path + '/data_FNO_F' + flip_data +'.pdf')
+        else:
+            plt.savefig(save_path + '/data_FNO_F.pdf')
+
+    return spks, pos_ss, speed_ss, sniff_freq_ss
+
+
+
 
 """
 Spike analysis

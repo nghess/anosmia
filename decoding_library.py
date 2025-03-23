@@ -1,6 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
-
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import time
+import os
 
 
 
@@ -58,9 +62,32 @@ def prepare_latencies_for_kalman(latency_matrix, method: str = 'log', max_latenc
     return normalized_latencies
 
 
+class SequenceDataset(Dataset):
+    def __init__(self, rates, behavior, blocks, sequence_length):
+        # Pre-convert to torch tensors once
+        self.rates = torch.tensor(rates, dtype=torch.float32)
+        self.behavior = torch.tensor(behavior, dtype=torch.float32)
+        self.sequence_length = sequence_length
+        self.indices = []
+        for start, end in blocks:
+            for i in range(start, end - sequence_length):
+                self.indices.append(i)
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        i = self.indices[idx]
+        # Now slicing is done on pre-converted tensors
+        X = self.rates[i: i + self.sequence_length, :]
+        y = self.behavior[i + self.sequence_length, :]
+        return X, y
+
+
 """
 Train test split
 """
+
 def cv_split(data, k, k_CV=10, n_blocks=10):
     '''
     Perform cross-validation split of the data, following the Hardcastle et 
@@ -379,6 +406,106 @@ class KalmanFilterDecoder:
         return fig
 
 
+class LSTMDecoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers = 1, dropout = 0.1):
+        super(LSTMDecoder, self).__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout, bidirectional=False)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        return self.fc(lstm_out[:, -1, :])
+
+
+def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, min_delta=1, factor=0.1, verbose=False):
+    """
+    Train the LSTM model with early stopping and learning rate scheduling.
+    
+    Parameters
+    ----------
+    model : MLPModel
+        The model to train
+    X : torch.Tensor
+        Input features
+    y : torch.Tensor
+        Target values
+    lr : float
+        Initial learning rate
+    epochs : int
+        Maximum number of epochs
+    patience : int
+        Number of epochs with no improvement after which training will be stopped
+    min_delta : float
+        Minimum change in loss to qualify as an improvement
+    factor : float
+        Factor by which the learning rate will be reduced
+        
+    Returns
+    -------
+    model : MLPModel
+        The trained model
+    history : list
+        Training loss history
+    """
+    # Initialize the training parameters
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=factor, patience=patience)
+    
+    best_loss = float('inf')
+    best_model_state = model.state_dict().copy()  # Save a copy of the model state
+    counter = 0
+
+    optimizer.zero_grad()
+
+    # warmup for the CUDA graphs
+
+    # Training the model
+    history = []
+    start = time.time()
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            outputs = model(X_batch.to(device, non_blocking=True))
+            loss = criterion(outputs, y_batch.to(device, non_blocking=True))
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * X_batch.size(0)
+
+        # Average loss
+        epoch_loss /= len(train_loader.dataset)
+
+        # Evaluation and early stopping
+        if epoch_loss < best_loss - min_delta:
+            best_loss = epoch_loss
+            best_model_state = model.state_dict().copy()  # Save a copy of the model state
+            counter = 0
+        else:
+            counter += 1
+            if counter >= patience:
+                break
+
+        # Learning rate scheduler and history
+        scheduler.step(epoch_loss)
+        history.append(epoch_loss)
+
+        if verbose:
+            if epoch % 10 == 0:
+                print(f"Epoch {epoch:4d} | Loss: {epoch_loss:.4f} | Time: {time.time() - start:.2f} s")
+                start = time.time()
+
+
+                    
+            
+
+    # Load the best model
+    model.load_state_dict(best_model_state)
+    
+    return model, history
+    
 
 """
 Plotting functions
@@ -388,3 +515,27 @@ Plotting functions
 """Helper functions
 """
 
+# saving a textfile with all parameters
+def save_parameters(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, use_GPU, save_dir):
+
+    with open(os.path.join(save_dir, 'parameters.txt'), 'w') as f:
+        f.write(f"window_size: {window_size}\n")
+        f.write(f"step_size: {step_size}\n")
+        f.write(f"sigma_smooth: {sigma_smooth}\n")
+        f.write(f"use_units: {use_units}\n")
+        f.write(f"speed_threshold: {speed_threshold}\n")
+        f.write(f"n_shifts: {n_shifts}\n")
+        f.write(f"k_CV: {k_CV}\n")
+        f.write(f"n_blocks: {n_blocks}\n")
+        f.write(f'Target: {target}\n')
+        f.write(f"sequence_length: {sequence_length}\n")
+        f.write(f"hidden_dim: {hidden_dim}\n")
+        f.write(f"num_layers: {num_layers}\n")
+        f.write(f"dropout: {dropout}\n")
+        f.write(f"num_epochs: {num_epochs}\n")
+        f.write(f"lr: {lr}\n")
+        f.write(f"patience: {patience}\n")
+        f.write(f"min_delta: {min_delta}\n")
+        f.write(f"factor: {factor}\n")
+        f.write(f"use_GPU: {use_GPU}\n")
+        f.write(f"save_dir: {save_dir}\n")
