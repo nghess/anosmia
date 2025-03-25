@@ -117,7 +117,6 @@ def cv_split(data, k, k_CV=10, n_blocks=10):
     
     # Keep track of which indices in the original data are the start of test blocks
     test_block_starts = []
-    train_block_starts = []
     
     for block in range(n_blocks):
         i_start = int((block + k/k_CV)*block_size)
@@ -417,7 +416,7 @@ class LSTMDecoder(nn.Module):
         return self.fc(lstm_out[:, -1, :])
 
 
-def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, min_delta=1, factor=0.1, verbose=False):
+def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, min_delta=0.1, factor=0.1, verbose=False):
     """
     Train the LSTM model with early stopping and learning rate scheduling.
     
@@ -459,8 +458,6 @@ def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, m
 
     optimizer.zero_grad()
 
-    # warmup for the CUDA graphs
-
     # Training the model
     history = []
     start = time.time()
@@ -495,14 +492,12 @@ def train_LSTM(model, train_loader, device, lr=0.01, epochs=1000, patience=50, m
         if verbose:
             if epoch % 10 == 0:
                 print(f"Epoch {epoch:4d} | Loss: {epoch_loss:.4f} | Time: {time.time() - start:.2f} s")
-                start = time.time()
 
-
-                    
-            
+ 
 
     # Load the best model
     model.load_state_dict(best_model_state)
+
     
     return model, history
     
@@ -516,7 +511,7 @@ Plotting functions
 """
 
 # saving a textfile with all parameters
-def save_parameters(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, use_GPU, save_dir):
+def save_parameters(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, save_dir):
 
     with open(os.path.join(save_dir, 'parameters.txt'), 'w') as f:
         f.write(f"window_size: {window_size}\n")
@@ -537,5 +532,4 @@ def save_parameters(window_size, step_size, sigma_smooth, use_units, speed_thres
         f.write(f"patience: {patience}\n")
         f.write(f"min_delta: {min_delta}\n")
         f.write(f"factor: {factor}\n")
-        f.write(f"use_GPU: {use_GPU}\n")
         f.write(f"save_dir: {save_dir}\n")

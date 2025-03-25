@@ -1,64 +1,40 @@
+print("\nFiring up the engines!\n")
+import time
+START = time.time()
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib
 from scipy.stats import ranksums
-import concurrent.futures
 import torch
 from torch.utils.data import DataLoader
-import time
+import torch.multiprocessing as mp
 import os
-
 from decoding_library import *
 from plotting import plot_training, plot_preds, plot_rmse
 from core import compute_spike_rates_sliding_window_by_region_smooth, load_behavior, align_brain_and_behavior, compute_sniff_freqs_bins, preprocess_rnp
 from plotting import plot_position_trajectories
+print(f"Engines are up and running ({time.time() - START:.2f}s)\n\n")
 
 
 
-def process_fold_worker(rank, args):
-    """
-    Worker function to process a single fold.
-    
-    Parameters:
-        rank: The fold number (process index).
-        args: A tuple containing:
-            - spike_rates: Full spike rates array.
-            - behavior: Normalized behavior array.
-            - n_folds: Total number of folds.
-            - shift: The current shift value.
-            - current_save_path: Where to save outputs.
-            - behavior_name: Name of the behavior.
-            - behavior_dim: Behavior dimensions.
-            - model_params: Model and training parameters.
-            - rmse_list: A shared list to store the RMSE for each fold.
-    """
-    (spike_rates, behavior, n_folds, shift, current_save_path,
-     behavior_name, behavior_dim, model_params, rmse_list) = args
 
-    # Here, 'rank' serves as the fold index.
-    rmse = process_fold(spike_rates, behavior, rank, shift,
-                        current_save_path, behavior_name, behavior_dim, model_params, rank)
-    rmse_list[rank] = rmse  # Store the result in the shared list.
+def process_fold(rates_train, rates_test, train_switch_ind, test_switch_ind, behavior_train, behavior_test, behavior, behavior_mean, behavior_std, k, shift, current_save_path, behavior_name, params, device):
 
-
-
-def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_name, params, device):
-
-
-    np.random.seed(int(time.time()) + k)
     plt.style.use('dark_background')
 
+    # Set the device
+    if device:
+        os.environ['CUDA_VISIBLE_DEVICES'] = device
+        device = torch.device('cuda:0')
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    k_CV, n_blocks, plot_predictions, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor = params
 
-    behavior_mean = np.mean(behavior, axis=0)
-    behavior_std = np.std(behavior, axis=0)
-    behavior = (behavior - behavior_mean) / behavior_std
-    
-    rates_train, rates_test, train_switch_ind, test_switch_ind = cv_split(spike_rates, k, k_CV=k_CV, n_blocks=n_blocks)
-    behavior_train, behavior_test, _, _ = cv_split(behavior, k, k_CV=k_CV, n_blocks=n_blocks)
+    batch_size = min(8192, len(behavior))
 
+    # Unpack the parameters
+    plot_predictions, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor = params
 
     # Create the model
     lstm_model = LSTMDecoder(input_dim=rates_train.shape[1], hidden_dim=hidden_dim, output_dim=behavior.shape[1], num_layers=num_layers, dropout = dropout).to(device)
@@ -66,7 +42,7 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
     # Prepare the training data for LSTM
     blocks = [(train_switch_ind[i], train_switch_ind[i + 1]) for i in range(len(train_switch_ind) - 1)]
     train_dataset = SequenceDataset(rates_train, behavior_train, blocks, sequence_length)
-    train_loader = DataLoader(train_dataset, batch_size=min(16_384, len(train_dataset)), shuffle=False, num_workers=1, pin_memory=True, prefetch_factor=1, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=min(batch_size, len(train_dataset)), shuffle=False, num_workers=0, pin_memory=True, prefetch_factor=None)
 
     # Training the LSTM model
     trained_lstm_model, lstm_history = train_LSTM(lstm_model, train_loader, device, lr=lr, epochs=num_epochs, patience=patience, min_delta=min_delta, factor=factor)
@@ -81,7 +57,7 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
     # Prepare the test data for LSTM
     test_blocks = [(test_switch_ind[i], test_switch_ind[i + 1]) for i in range(len(test_switch_ind) - 1)]
     test_dataset = SequenceDataset(rates_test, behavior_test, test_blocks, sequence_length)
-    test_loader = DataLoader(test_dataset, batch_size=min(16_384, len(test_dataset)), persistent_workers=True, num_workers=1, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=min(batch_size, len(test_dataset)), num_workers=0, pin_memory=True)
 
     # Predict on the test set
     trained_lstm_model.eval()
@@ -118,117 +94,42 @@ def process_fold(spike_rates, behavior, k, shift, current_save_path, behavior_na
 
 
 
-def parallel_process_session_GPU(spike_rates, behavior, n_folds, shift, current_save_path, 
-                             behavior_name, behavior_dim, model_params, parallel):
-    """
-    Run process_fold in parallel for all folds using torch.multiprocessing.
-    
-    Parameters:
-        spike_rates: Full spike rates array.
-        behavior: Normalized behavior array.
-        n_folds: Number of CV folds.
-        shift: The current shift value.
-        current_save_path: Where to save outputs for this region/shift.
-        behavior_name, behavior_dim: Behavior scaling and labeling.
-        model_params: List of model and training parameters (e.g., k_CV, n_blocks, plot_predictions, etc.).
-    
-    Returns:
-        List of RMSE values, one per fold.
-    """
-    
-    # Create a manager to handle a shared list.
-    manager = mp.Manager()
-    rmse_list = manager.list([None] * n_folds)
-    
-    # Pack the common arguments to pass to each worker.
-    args = (spike_rates, behavior, n_folds, shift, current_save_path, 
-            behavior_name, behavior_dim, model_params, rmse_list)
-    
-    # Launch processes, one per fold.
-    # mp.spawn will automatically pass the rank (from 0 to n_folds-1) as the first argument.
-    mp.spawn(process_fold_worker, args=(args,), nprocs=n_folds, join=True)
-    
-    # Convert the shared list to a regular list before returning.
-    return list(rmse_list)
 
-
-def parallel_process_session_CPU(spike_rates, behavior, k_CV, n_shifts, region_save_path, behavior_name, num_workers, model_params):
-    """
-    Run process_fold in parallel for all folds using torch.multiprocessing.
-    
-    Parameters:
-        spike_rates: Full spike rates array.
-        behavior: Normalized behavior array.
-        n_folds: Number of CV folds.
-        shift: The current shift value.
-        current_save_path: Where to save outputs for this region/shift.
-        behavior_name, behavior_dim: Behavior scaling and labeling.
-        model_params: List of model and training parameters (e.g., k_CV, n_blocks, plot_predictions, etc.).
-    
-    Returns:
-        List of RMSE values, one per fold.
-    """
- 
-    rmse_list = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = []
-
-        # Looping through the circular shifts
-        for shift in range(n_shifts):
-            if shift == 0:
-                current_save_path = os.path.join(region_save_path, 'true')
-                behavior_use = behavior
-            else:
-                roll_value = np.random.randint(100, np.max(behavior.shape) - 100)
-                behavior_use = np.roll(behavior, roll_value, axis=0)
-                current_save_path = os.path.join(region_save_path, 'null')
-                os.makedirs(current_save_path, exist_ok=True)
-
-            # Loop through the cross-validation folds
-            for k in range(k_CV):
-                futures.append(executor.submit(
-                    process_fold,
-                    spike_rates, behavior_use, k, shift, current_save_path,
-                    behavior_name, model_params, torch.device('cpu')))
-        
-        for future in concurrent.futures.as_completed(futures):
-            rmse_list.append(future.result())
-
-    # Separate the true and null RMSE
-    true_rmse = rmse_list[:k_CV * n_shifts]
-    null_rmse = rmse_list[k_CV * n_shifts:]
-    
-    return true_rmse, null_rmse
+def compile_folds(spike_rates, behavior, behavior_mean, behavior_std, n_folds, shift, current_save_path, 
+                           behavior_name, model_params, parallel):
     
 
 
-def parallel_process_session(spike_rates, behavior, n_folds, shift, current_save_path, 
-                           behavior_name, behavior_dim, model_params, parallel, use_GPU):
+    # Check the number of available cuda devices (MIG instances) and collect their names.
+    devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    mig_devices = []
+    if devices:
+        device_list = devices.split(',')
+        for i, d in enumerate(device_list):
+            mig_devices.append(d)
+    else:
+        print("No visible CUDA devices found.")
+
+    arg_list = []
     if not parallel:
-        return [process_fold(spike_rates, behavior, k, shift, current_save_path, 
-                           behavior_name, behavior_dim, model_params, use_GPU) 
-                for k in range(n_folds)]
+        mig_devices = [False for _ in range(n_folds)]
+    for k in range(n_folds):
+        rates_train, rates_test, train_switch_ind, test_switch_ind = cv_split(spike_rates, k, k_CV=k_CV, n_blocks=n_blocks)
+        behavior_train, behavior_test, _, _ = cv_split(behavior, k, k_CV=k_CV, n_blocks=n_blocks)
+        arg_list.append((rates_train, rates_test, train_switch_ind, test_switch_ind, behavior_train, behavior_test, behavior, behavior_mean, behavior_std, k, shift, current_save_path, behavior_name, model_params, mig_devices[k]))
+
+
+
+    # For running the process_fold function sequentially or in parallel
+    if not parallel:
+        return [process_fold(*arg_list[k]) for k in range(n_folds)]
+    else:
+        with mp.Pool(n_folds) as pool:
+            results = pool.starmap(process_fold, arg_list)
+        return results
     
-    # Calculate number of GPU workers based on available memory
-    n_gpus = torch.cuda.device_count()
-    gpu_memory = torch.cuda.get_device_properties(0).total_memory
-    # Adjust workers based on model size and available memory
-    max_workers = min(n_gpus * 2, n_folds)  # Use up to 2 workers per GPU
-    
-    rmse_list = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        for k in range(n_folds):
-            futures.append(executor.submit(
-                process_fold,
-                spike_rates, behavior, k, shift, current_save_path,
-                behavior_name, behavior_dim, model_params, use_GPU
-            ))
-        
-        for future in concurrent.futures.as_completed(futures):
-            rmse_list.append(future.result())
-    
-    return rmse_list
+
+
 
 
 def process_session(params):
@@ -242,12 +143,12 @@ def process_session(params):
         List of parameters for the decoding.
     """
 
- 
+    
 
     # Unpack the parameters
-    mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, use_GPU = params
-    model_params = [k_CV, n_blocks, plot_predictions, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor]
-
+    mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor = params
+    model_params = [plot_predictions, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor]
+    print(f"\n\nProcessing {mouse}/{session}")
 
     # Preprocessing for the clickbait-ephys project
     if behavior_dir:
@@ -269,6 +170,7 @@ def process_session(params):
 
     # Looping through the regions for decodinh
     for region in ['HC', 'OB']:
+        start_time = time.time()
 
         # Preprocessing for the RNP dataset
         if not behavior_dir:
@@ -335,42 +237,45 @@ def process_session(params):
                 data_other['sns'] = mean_freqs
                 data_other['sns'] = data['sns'].interpolate(method='linear')
                 data_other.dropna(subset=['x', 'y', 'v_x', 'v_y', 'sns'], inplace=True)
-                behavior = data.iloc[:, :-8].values
+                behavior = data_other.iloc[:, :-8].values
                 behavior_name = [f"$Y_{{{i}}}$" for i in range(behavior.shape[1])]
-            max_roll = len(behavior) - 100
+            max_roll = len(behavior) - 1000
 
 
-        print(f"Processing {mouse}/{session}/{region}")
+        print(f"Beggining {region}")
+
+        behavior_mean = np.mean(behavior, axis=0)
+        behavior_std = np.std(behavior, axis=0)
+        behavior = (behavior - behavior_mean) / behavior_std
 
         # Loop through the shifts
-        if use_GPU:
-            true_rmse = []
-            null_rmse = []
-            for shift in range(n_shifts + 1):
-                if shift == 0:
-                    current_save_path = os.path.join(region_save_path, 'true')
-                    os.makedirs(current_save_path, exist_ok=True)
-                    behavior_use = behavior
-                else:
-                    roll_value = np.random.randint(100, max_roll)
-                    behavior_use = np.roll(behavior, roll_value, axis=0)
-                    current_save_path = os.path.join(region_save_path, 'null')
-                    os.makedirs(current_save_path, exist_ok=True)
+        true_rmse = []
+        null_rmse = []
+        for shift in range(n_shifts + 1):
+            if shift == 0:
+                current_save_path = os.path.join(region_save_path, 'true')
+                os.makedirs(current_save_path, exist_ok=True)
+                behavior_use = behavior
+            else:
+                roll_value = np.random.randint(1000, max_roll)
+                behavior_use = np.roll(behavior, roll_value, axis=0)
+                current_save_path = os.path.join(region_save_path, 'null')
+                os.makedirs(current_save_path, exist_ok=True)
 
-                # Loop through the cross-validation folds to get decoding errors
-                if shift == 0:
-                    true_rmse = parallel_process_session_GPU(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, model_params, parallel = True)
-                else:
-                    null_rmse.append(parallel_process_session_GPU(spike_rates, behavior_use, k_CV, shift, current_save_path, behavior_name, model_params, parallel = True))
-            true_rmse = np.array(true_rmse).flatten()
-            null_rmse = np.array(null_rmse).flatten()
+            # Loop through the cross-validation folds to get decoding errors
+            if shift == 0:
+                true_rmse = compile_folds(spike_rates, behavior_use, behavior_mean, behavior_std, k_CV, shift, current_save_path, behavior_name, model_params, parallel = False)
+            else:
+                null_rmse.append(compile_folds(spike_rates, behavior_use,behavior_mean, behavior_std,  k_CV, shift, current_save_path, behavior_name, model_params, parallel = False))
+
+
+        true_rmse = np.array(true_rmse).flatten()
+        null_rmse = np.array(null_rmse).flatten()
         
-        else:
-            true_rmse, null_rmse = parallel_process_session_CPU(spike_rates, behavior, k_CV, n_shifts, region_save_path, behavior_name, 60, model_params)
 
         # rank sum test
         _ , p_val = ranksums(true_rmse, null_rmse, 'less')
-        print(f"Rank sum test p-value for {mouse}/{session}: {p_val}")
+        print(f"Rank sum test p-value: {p_val}")
         
         # plot histograms of the rmse
         plot_rmse(true_rmse, null_rmse, p_val, region_save_path)
@@ -383,6 +288,9 @@ def process_session(params):
         # save the mse results
         np.save(os.path.join(region_save_path, f"true_rmse.npy"), true_rmse)
         np.save(os.path.join(region_save_path, f"null_rmse.npy"), null_rmse)
+        print(f"Finished {region} in {time.time() - start_time:.2f}s")
+
+
 
 
 
@@ -420,7 +328,7 @@ def rnp():
 
     # Defining the decoding parameters
     n_shifts = 10 # Define number of shifts for circular shifting of behavior data
-    k_CV = 10 # Define number of cross-validation folds
+    k_CV = 12 # Define number of cross-validation folds
     n_blocks = 10 # Define number of blocks for cross-validation
     plot_predictions = True
     sequence_length = 10 # Define the sequence length for LSTM input
@@ -483,8 +391,10 @@ def rnp():
 
 
 
-def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float = 2.5, use_units: str = 'good/mua', speed_threshold: int = 100, n_shifts: int = 1, k_CV: int = 8, n_blocks: int = 10, plot_predictions: bool = True, sequence_length: int = 10, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.5, num_epochs: int = 500, lr: float = 0.01, patience: int = 20, min_delta: float = 0.001, factor: float = 0.5, fs: int = 30_000, use_GPU: bool = True):
 
+
+
+def main(args):
 
     """
     Decode the neural data using LSTM model.
@@ -529,10 +439,30 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
         Define the factor for reducing the learning rate on plateau
     fs : int
         Sampling rate for neural data (mua.npy)
-    use_GPU : bool
-        Whether to use GPU for parallel processing
-    
     """
+
+    # Access arguments as attributes
+    target = args.target
+    window_size = args.window_size
+    n_shifts = args.n_shifts
+    use_units = args.use_units
+    plot_predictions = args.plot_predictions
+    sequence_length = args.sequence_length
+    hidden_dim = args.hidden_dim
+    num_layers = args.num_layers
+    step_size = args.step_size
+    sigma_smooth = args.sigma_smooth
+    speed_threshold = args.speed_threshold
+    k_CV = args.k_CV
+    n_blocks = args.n_blocks
+    dropout = args.dropout
+    num_epochs = args.num_epochs
+    lr = args.lr
+    patience = args.patience
+    min_delta = args.min_delta
+    factor = args.factor
+    fs = args.fs
+
 
     # Set plotting style and context
     matplotlib.use('Agg')  # Use non-interactive backend to avoid issues in threaded environment
@@ -542,77 +472,101 @@ def main(window_size: float = 0.1, step_size: float = 0.1, sigma_smooth: float =
 
     # defining directories
     spike_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/kilosorted"
-    save_dir_main = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/figures/testing"
+    save_dir_main = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/figures/LSTM"
     events_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/behavior_data"
     SLEAP_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/sleap_predictions"
     sniff_dir = "/projects/smearlab/shared/clickbait-ephys(3-20-25)/sniff events"
 
 
-    for target in ['position', 'sniffing', 'neural']:
+    # creating a directory to save the figures
+    save_dir = os.path.join(save_dir_main, f"window_size_{window_size}_target_{target}_sequence_length_{sequence_length}_hidden_dim_{hidden_dim}_num_layers_{num_layers}_shifts_{n_shifts}")
+    os.makedirs(save_dir, exist_ok=True)
 
-        # creating a directory to save the figures
-        save_dir = os.path.join(save_dir_main, f"window_size_{window_size}_target_{target}")
-        os.makedirs(save_dir, exist_ok=True)
+    # saving a textfile with all parameters
+    save_parameters(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, save_dir)
 
-        # saving a textfile with all parameters
-        save_parameters(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, use_GPU, save_dir)
+    # Looping through the data
+    mice = os.listdir(spike_dir)
+    mice = [m for m in mice if os.path.isdir(os.path.join(spike_dir, m))]
+    for mouse in mice:
+        sessions = os.listdir(os.path.join(spike_dir, mouse))
+        sessions = [s for s in sessions if os.path.isdir(os.path.join(spike_dir, mouse, s))]
+        for session in sessions:
 
-        # Looping through the data
-        mice = os.listdir(spike_dir)
-        mice = [m for m in mice if os.path.isdir(os.path.join(spike_dir, m))]
-        for mouse in mice:
-            sessions = os.listdir(os.path.join(spike_dir, mouse))
-            sessions = [s for s in sessions if os.path.isdir(os.path.join(spike_dir, mouse, s))]
-            for session in sessions:
+            # Building the task list
+            kilosort_dir = os.path.join(spike_dir, mouse, session)
+            behavior_dir = os.path.join(events_dir, mouse, session)
+            tracking_dir = os.path.join(SLEAP_dir, mouse, session)
+            sniff_params_dir = os.path.join(sniff_dir, mouse, session)
+            if not os.path.exists(kilosort_dir) or not os.path.exists(behavior_dir) or not os.path.exists(tracking_dir) or not os.path.exists(sniff_dir):
+                print(f"Skipping {mouse}/{session} due to missing data.")
+                continue
 
-                # Building the task list
-                kilosort_dir = os.path.join(spike_dir, mouse, session)
-                behavior_dir = os.path.join(events_dir, mouse, session)
-                tracking_dir = os.path.join(SLEAP_dir, mouse, session)
-                sniff_params_dir = os.path.join(sniff_dir, mouse, session)
-                if not os.path.exists(kilosort_dir) or not os.path.exists(behavior_dir) or not os.path.exists(tracking_dir) or not os.path.exists(sniff_dir):
-                    print(f"Skipping {mouse}/{session} due to missing data.")
-                    continue
+            # Define the parameters
+            params = [mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_params_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor]
 
-                # Define the parameters
-                params = [mouse, session, kilosort_dir, behavior_dir, tracking_dir, sniff_params_dir, save_dir, window_size, step_size, fs, sigma_smooth, use_units, speed_threshold, k_CV, n_blocks, n_shifts, plot_predictions, target, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, use_GPU]
+            # Run the decoding
+            try:
+                process_session(params)
+            except Exception as e:
+                print(f"Error processing {mouse}/{session}: {e}")
 
-                # Run the decoding
-                try:
-                    process_session(params)
-                except Exception as e:
-                    print(f"Error processing {mouse}/{session}: {e}")
+
+
+
 
 
 
 
 if __name__ == "__main__":
-
-    use_GPU = True
-
+    import argparse
 
 
-    # Set the parameters
-    window_size = 0.1
-    step_size = 0.1
-    sigma_smooth = 2.5
-    use_units = 'good/mua'
-    speed_threshold = 100
-    n_shifts = 5
-    k_CV = 10
-    n_blocks = 5
-    plot_predictions = True
-    sequence_length = 10
-    hidden_dim = 32
-    num_layers = 2
-    dropout = 0.1
-    num_epochs = 500
-    lr = 0.01
-    patience = 20
-    min_delta = 0.001
-    factor = 0.5
-    fs = 30_000
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--target', type=str, choices=['position', 'velocity', 'sniffing', 'neural'], default='position',
+                        help='What to decode')
+    parser.add_argument('--window_size', type=float, default=0.1,
+                        help='size of the window for spike rate computation in seconds (e.g., 0.1, 0.03)')
+    parser.add_argument('--step_size', type=float, default=0.1,
+                        help='size of the step for sliding window in seconds (Should be equal to window_size)')
+    parser.add_argument('--sigma_smooth', type=float, default=2.5,
+                        help='Standard deviation for gaussian smoothing of spike rates')
+    parser.add_argument('--use_units', type=str, choices=['good', 'good/mua', 'mua'], default='good/mua',
+                        help='What kilosort cluster labels to use')
+    parser.add_argument('--speed_threshold', type=float, default=100,
+                        help='Tracking point with speed above this value will be removed before interpolation')
+    parser.add_argument('--n_shifts', type=int, default=1,
+                        help='Number of shifts for circular shifting of behavior data')
+    parser.add_argument('--k_CV', type=int, default=12,
+                        help='Number of cross-validation folds')
+    parser.add_argument('--n_blocks', type=int, default=5,
+                        help='Number of blocks for cross-validation')
+    parser.add_argument('--plot_predictions', type=bool, default=True,
+                        help='Whether to plot the predictions')
+    parser.add_argument('--sequence_length', type=int, default=10,
+                        help='Define the sequence length for LSTM input')
+    parser.add_argument('--hidden_dim', type=int, default=64,
+                        help='Define the hidden dimension for LSTM')
+    parser.add_argument('--num_layers', type=int, default=2,
+                        help='Define the number of layers for LSTM')
+    parser.add_argument('--dropout', type=float, default=0.5,
+                        help='Define the dropout for LSTM')
+    parser.add_argument('--num_epochs', type=int, default=500,
+                        help='Define the number of epochs for LSTM training')
+    parser.add_argument('--lr', type=float, default=0.01,
+                        help='Define the learning rate for LSTM training')
+    parser.add_argument('--patience', type=int, default=20,
+                        help='Define the patience for early stopping')
+    parser.add_argument('--min_delta', type=float, default=0.001,
+                        help='Define the minimum delta for early stopping')
+    parser.add_argument('--factor', type=float, default=0.5,
+                        help='Define the factor for reducing the learning rate on plateau')
+    parser.add_argument('--fs', type=int, default=30_000,
+                        help='Sampling rate for neural data (mua)')
+    args = parser.parse_args()
 
     # Run the main function
-    #main(window_size, step_size, sigma_smooth, use_units, speed_threshold, n_shifts, k_CV, n_blocks, plot_predictions, sequence_length, hidden_dim, num_layers, dropout, num_epochs, lr, patience, min_delta, factor, fs, use_GPU)
-    #print(f"Total time: {time.time() - start_time} seconds")
+    start_time = time.time()
+    main(args)
+    print(f"\n\nTotal time to run analysis: {time.time() - start_time} seconds")
