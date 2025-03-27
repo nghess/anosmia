@@ -478,7 +478,7 @@ def plot_position_trajectories(data, save_path=None):
 
 
     if save_path:
-        plt.savefig(save_path + '\\position.png', dpi=300)
+        plt.savefig(os.path.join(save_path, 'position.png'), dpi=300)
         plt.close(fig)
     else:
         plt.show()
